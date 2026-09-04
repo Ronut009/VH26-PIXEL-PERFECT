@@ -10,7 +10,7 @@ function Wordmark() {
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
         <path
           d="M1 10h3.2l2-5.2 3 11L12 8.2l1.4 1.8H19"
-          stroke="#2563EB"
+          stroke="#C8FF3D"
           strokeWidth="1.6"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -82,7 +82,7 @@ export default async function LoginPage({
           )}
 
           {error && state.status === "signed-out" && (
-            <p className="mt-3 rounded-md border border-edge bg-[#FEF2F2] px-3 py-2 text-[12px] text-[#B91C1C]">
+            <p className="mt-3 rounded-md border border-[#69332C] bg-[#3A1915] px-3 py-2 text-[12px] text-[#FF9D93]">
               {error}
             </p>
           )}

@@ -33,7 +33,7 @@ function SmallButton({
       disabled={disabled}
       className={`rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors disabled:cursor-wait disabled:opacity-60 ${
         tone === "primary"
-          ? "bg-brand text-white hover:bg-[#1D4ED8]"
+          ? "bg-brand text-[#10120F] hover:bg-[#D8FF66]"
           : "border border-edge bg-panel text-text hover:bg-panel-2"
       }`}
     >

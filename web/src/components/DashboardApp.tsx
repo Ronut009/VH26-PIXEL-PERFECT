@@ -112,14 +112,14 @@ export function DashboardApp({ user }: { user: DashboardUser }) {
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto max-w-[1400px] px-4 py-5 sm:px-6 sm:py-6">
               {isSample && (
-                <p className="mb-5 rounded-md border border-[#FDE68A] bg-[#FFFBEB] px-4 py-2.5 text-[12px] text-[#B45309]">
+                <p className="mb-5 rounded-md border border-[#755522] bg-[#38270E] px-4 py-2.5 text-[12px] text-[#FFC66E]">
                   Sample data (<span className="font-mono">?demo=1</span>). These figures are a
                   fixture, not your database. Drop the query parameter to see real pipeline state.
                 </p>
               )}
 
               {backend.state === "degraded" && backend.message && (
-                <p className="mb-5 rounded-md border border-[#FDE68A] bg-[#FFFBEB] px-4 py-2.5 text-[12px] text-[#B45309]">
+                <p className="mb-5 rounded-md border border-[#755522] bg-[#38270E] px-4 py-2.5 text-[12px] text-[#FFC66E]">
                   {backend.message}
                   {backend.action ? ` ${backend.action}` : ""}
                 </p>
@@ -150,7 +150,7 @@ export function DashboardApp({ user }: { user: DashboardUser }) {
                     <Kpi
                       label="Alerts consolidated"
                       value={`${t.reduction.toFixed(1)}%`}
-                      tone="text-[#15803D]"
+                      tone="text-ok"
                       emphasis
                       sub={
                         <span>
@@ -164,7 +164,7 @@ export function DashboardApp({ user }: { user: DashboardUser }) {
                     <Kpi
                       label="Critical incidents"
                       value={critical.toLocaleString()}
-                      tone={critical > 0 ? "text-[#B91C1C]" : "text-text"}
+                      tone={critical > 0 ? "text-crit" : "text-text"}
                       sub={`${t.paged} paged through PagerDuty`}
                     />
                   </div>
@@ -325,7 +325,7 @@ export function DashboardApp({ user }: { user: DashboardUser }) {
                       ))}
                     </dl>
                     {backend.message && (
-                      <p className="mt-3 text-[12px] text-[#B45309]">
+                      <p className="mt-3 text-[12px] text-[#FFC66E]">
                         {backend.message}
                         {backend.action ? ` ${backend.action}` : ""}
                       </p>

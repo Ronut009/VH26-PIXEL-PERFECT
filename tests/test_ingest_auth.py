@@ -210,3 +210,50 @@ def test_the_plain_token_header_works_end_to_end(client):
     )
 
     assert response.status_code == 200
+
+
+# ── the dashboard's correlation view ──────────────────────────────────────
+
+
+def test_edges_recent_serves_the_route_the_dashboard_proxies(client):
+    """The Correlations panel had nothing to render on a cold load.
+
+    Edges were published only on the SSE stream, so a first page load - or a
+    reconnect after sign-in - showed an empty graph while the correlations sat
+    in the database. The dashboard already proxied `/v1/edges/recent` and
+    swallowed the 404 to fail quiet; this asserts it now means something.
+    """
+
+    for _ in range(2):
+        assert (
+            client.post(
+                "/v1/ingest/prometheus", json=_payload(), headers=INGEST_HEADERS
+            ).status_code
+            == 200
+        )
+    second = _payload()
+    second["alerts"][0]["labels"]["alertname"] = "DatabasePoolExhausted"
+    second["alerts"][0]["fingerprint"] = "def456"
+    assert (
+        client.post(
+            "/v1/ingest/prometheus", json=second, headers=INGEST_HEADERS
+        ).status_code
+        == 200
+    )
+
+    body = client.get("/v1/edges/recent").json()
+
+    assert "edges" in body
+    for edge in body["edges"]:
+        # Exactly the shape web/src/lib/types.ts normalises.
+        assert {"src_incident_id", "dst_incident_id", "weight", "last_seen_at"} <= set(
+            edge
+        )
+
+
+def test_edges_recent_refuses_an_unbounded_read(client):
+    """The edge table grows with the square of the active incident set."""
+
+    assert client.get("/v1/edges/recent?limit=0").status_code == 400
+    assert client.get("/v1/edges/recent?limit=99999").status_code == 400
+    assert client.get("/v1/edges/recent?limit=10").status_code == 200

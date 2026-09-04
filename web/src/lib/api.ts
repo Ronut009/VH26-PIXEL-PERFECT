@@ -131,10 +131,13 @@ export async function fetchIncidentsSince(since?: string): Promise<Incident[]> {
 }
 
 /**
- * There is no REST edges route on the backend; correlation edges are only
- * published on the SSE stream (GET /v1/stream, `snapshot` + `graph.edge.upsert`).
- * This stays isolated so switching this one function over to the stream does
- * not touch any component. Until then it resolves empty rather than throwing.
+ * Correlation edges for a cold load. They are also published on the SSE stream
+ * (GET /v1/stream, `snapshot` + `graph.edge.upsert`), but a stream only carries
+ * what happens after you subscribe - so before this route existed, a first page
+ * view rendered an empty correlation graph even with edges in the database.
+ *
+ * Still resolves empty rather than throwing: an unreachable backend should
+ * leave the panel pending, not break the page.
  */
 export async function fetchIncidentEdges(): Promise<IncidentEdge[]> {
   try {

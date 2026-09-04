@@ -171,6 +171,7 @@ pointing at the backend.
 | `GET` | `/v1/github/incidents/{id}/diagnoses` | List sanitized diagnosis records for an incident (admin token required) |
 | `POST` | `/v1/github/analyses/{id}/patch-preview` | Generate a local-only, human-reviewable diff; never writes GitHub (admin token required) |
 | `GET` | `/v1/incidents/recent?since=<iso8601>` | Poll-friendly incident list, consumed by the dashboard |
+| `GET` | `/v1/edges/recent?limit=<n>` | Correlation edges for the dashboard's Correlations view on a cold load (bounded; default 500) |
 | `GET` | `/v1/stream[?after=<streamId>]` | Server-Sent Events — snapshot + live deltas (`incident.upsert`, `graph.edge.upsert`, `card.update`, `metrics.update`) |
 | `POST` | `/v1/slack/interactions` | Signed Slack interaction callbacks — Acknowledge / Resolve buttons |
 | `POST` | `/v1/pagerduty/webhooks` | Signed PagerDuty v3 webhooks — acknowledgement and resolution sync |

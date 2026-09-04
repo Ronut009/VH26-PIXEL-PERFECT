@@ -6,11 +6,13 @@ export const dynamic = "force-dynamic";
 /**
  * Same-origin mirror of `GET /v1/edges/recent`.
  *
- * That backend route does not exist yet (Anish's CoOccurrenceGraph slice).
- * Proxying it anyway keeps the last browser → backend call same-origin and
- * preserves the existing behaviour exactly: the upstream 404 arrives here as
- * a normal error response, and `fetchIncidentEdges` still fails quiet so the
- * root-cause panel shows its pending state rather than an error.
+ * The backend route now exists, so this returns real correlation edges rather
+ * than a tolerated 404. It matters on a cold load: edges used to be published
+ * only on the SSE stream, so a first page view - or a reconnect after sign-in -
+ * rendered an empty graph while the correlations sat in the database.
+ *
+ * `fetchIncidentEdges` still fails quiet, which stays useful: the panel should
+ * degrade to its pending state if the backend is unreachable, not error.
  */
 export async function GET(): Promise<Response> {
   const denied = await requireDashboardUser();

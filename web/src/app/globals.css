@@ -1,32 +1,28 @@
 @import "tailwindcss";
 
-/*
-  PulseGraph light operational theme.
-  Predominantly white and neutral. Colour is reserved for severity, system
-  state, correlation and live activity. No gradients, no glow, no glass.
-*/
+/* PulseGraph "signal console" theme: graphite, phosphor lime, cobalt data. */
 @theme {
-  --color-app: #f7f9fc;
-  --color-panel: #ffffff;
-  --color-panel-2: #f8fafc;
-  --color-edge: #e5eaf0;
+  --color-app: #10120f;
+  --color-panel: #171a15;
+  --color-panel-2: #20251d;
+  --color-edge: #394135;
 
-  --color-text: #172033;
-  --color-text-2: #64748b;
-  --color-text-3: #94a3b8;
+  --color-text: #f4f3e9;
+  --color-text-2: #b7c0ad;
+  --color-text-3: #7f8a77;
 
-  --color-brand: #2563eb;
-  --color-brand-soft: #eff4ff;
-  --color-cyan: #06b6d4;
-  --color-ok: #16a34a;
-  --color-warn: #f59e0b;
-  --color-crit: #ef4444;
+  --color-brand: #c8ff3d;
+  --color-brand-soft: #283414;
+  --color-cyan: #5de4ff;
+  --color-ok: #88df70;
+  --color-warn: #ffb54a;
+  --color-crit: #ff6b5e;
 
   --font-sans: var(--font-inter), system-ui, sans-serif;
   --font-mono: var(--font-mono-data), ui-monospace, monospace;
 }
 
-html { color-scheme: light; }
+html { color-scheme: dark; }
 
 body {
   background: var(--color-app);
@@ -40,8 +36,10 @@ body {
 @keyframes live-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 .live-pulse { animation: live-pulse 2s ease-in-out infinite; }
 
-:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 3px; }
 
-* { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+* { scrollbar-width: thin; scrollbar-color: #596553 transparent; }
+
+::selection { background: var(--color-brand); color: #10120f; }
 
 @media (prefers-reduced-motion: reduce) { .live-pulse { animation: none; } }

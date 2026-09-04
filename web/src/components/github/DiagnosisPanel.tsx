@@ -30,7 +30,7 @@ export function DiagnosisPanel({
           type="button"
           onClick={runDiagnosis}
           disabled={running}
-          className="rounded-md bg-brand px-3 py-2 text-[13px] font-medium text-white transition-colors hover:bg-[#1D4ED8] disabled:cursor-wait disabled:bg-[#93B4FB]"
+          className="rounded-md bg-brand px-3 py-2 text-[13px] font-semibold text-[#10120F] transition-colors hover:bg-[#D8FF66] disabled:cursor-wait disabled:bg-[#7F8A77]"
         >
           {running ? "Diagnosing…" : "Run diagnosis"}
         </button>

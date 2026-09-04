@@ -63,16 +63,26 @@ export function usePulseGraphStream() {
    * deleted, or had aged past the snapshot's row limit, stayed on screen for
    * the life of the tab -- the counts only ever grew.
    */
-  const replaceIncidents = useCallback((rows: Record<string, unknown>[]) => {
-    setIncidents(() => {
-      const next = new Map<string, Incident>();
-      for (const row of rows) {
-        const incident = normalizeIncident(row);
-        if (incident.incident_id) next.set(incident.incident_id, incident);
-      }
-      return next;
-    });
-  }, []);
+  /**
+   * Accepts raw rows or already-normalised incidents, because both callers are
+   * legitimate: the SSE snapshot arrives as untyped JSON, while the REST
+   * fallback has been through `normalizeIncident` already. Normalising twice is
+   * safe - it reads the same snake_case keys a normalised `Incident` carries -
+   * so this widens the type rather than forcing one caller to un-normalise.
+   */
+  const replaceIncidents = useCallback(
+    (rows: readonly (Record<string, unknown> | Incident)[]) => {
+      setIncidents(() => {
+        const next = new Map<string, Incident>();
+        for (const row of rows) {
+          const incident = normalizeIncident(row as Record<string, unknown>);
+          if (incident.incident_id) next.set(incident.incident_id, incident);
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   const replaceEdges = useCallback((rows: Record<string, unknown>[]) => {
     setEdges(() => {
@@ -104,20 +114,17 @@ export function usePulseGraphStream() {
   // REST fallback, used only when the stream cannot be established.
   const pollOnce = useCallback(async () => {
     try {
-      const batch = await fetchIncidentsSince(restCursorRef.current);
+      // Polling is the authoritative fallback when SSE is unavailable. Read a
+      // complete snapshot rather than only a delta: a server-side cleanup or
+      // resolved/removed incident must disappear from an already-open tab.
+      const batch = await fetchIncidentsSince();
       if (!mountedRef.current) return;
       for (const incident of batch) {
         if (!restCursorRef.current || incident.updated_at > restCursorRef.current) {
           restCursorRef.current = incident.updated_at;
         }
       }
-      if (batch.length > 0) {
-        setIncidents((prev) => {
-          const next = new Map(prev);
-          batch.forEach((incident) => next.set(incident.incident_id, incident));
-          return next;
-        });
-      }
+      replaceIncidents(batch);
       setState("polling");
       setLastUpdated(new Date());
       setLoading(false);
@@ -137,7 +144,7 @@ export function usePulseGraphStream() {
       setState("offline");
       setLoading(false);
     }
-  }, [router]);
+  }, [replaceIncidents, router]);
 
   useEffect(() => {
     mountedRef.current = true;

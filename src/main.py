@@ -347,6 +347,40 @@ async def incidents_recent(since: str | None = None):
     return {"incidents": [dict(row) for row in rows]}
 
 
+@app.get("/v1/edges/recent")
+async def edges_recent(limit: int = 500):
+    """Correlation edges, for the dashboard's Correlations view.
+
+    Edges were only ever published on the SSE stream, so the panel had nothing
+    to render until a live event arrived - a first page load, or a reconnect
+    after sign-in, showed an empty graph even though the correlations were
+    sitting in the database. The dashboard already proxied this path and
+    swallowed the 404 to keep failing quiet; this makes the call mean something.
+
+    Bounded and ordered by recency for the same reason the correlation
+    neighbourhood is: the edge table grows with the square of the active
+    incident set, and an unbounded read here would be the same mistake at the
+    read end.
+    """
+
+    if limit < 1 or limit > 5_000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 5000")
+
+    async with get_reader_connection(settings.DATABASE_PATH) as conn:
+        async with conn.execute(
+            """
+            SELECT src_incident_id, dst_incident_id, weight, last_seen_at
+            FROM edges
+            ORDER BY last_seen_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    return {"edges": [dict(row) for row in rows]}
+
+
 @app.get("/v1/health")
 async def health(request: Request):
     """Liveness only. See /v1/health/self for whether alerts are getting out."""

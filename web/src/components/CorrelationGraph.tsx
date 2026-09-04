@@ -80,10 +80,10 @@ export function CorrelationGraph({
         position: { x: col * COL_W, y: row * ROW_H },
         data: { label: incident.title },
         style: {
-          background: isSelected ? "#EFF4FF" : "#FFFFFF",
-          border: isCritical ? "1px solid #EF4444" : "1px solid #E5EAF0",
+          background: isSelected ? "#283414" : "#171A15",
+          border: isCritical ? "1px solid #FF6B5E" : "1px solid #394135",
           borderRadius: 4,
-          color: "#172033",
+          color: "#F4F3E9",
           fontSize: 12,
           lineHeight: 1.4,
           padding: "10px 12px",
@@ -104,11 +104,11 @@ export function CorrelationGraph({
         label: e.weight.toFixed(1),
         labelShowBg: true,
         labelBgPadding: [4, 2] as [number, number],
-        labelBgStyle: { fill: "#FFFFFF", stroke: "#E5EAF0" },
-        labelStyle: { fill: "#64748B", fontSize: 11 },
+        labelBgStyle: { fill: "#171A15", stroke: "#394135" },
+        labelStyle: { fill: "#B7C0AD", fontSize: 11 },
         // Thicker means the two fired together more often, so the strongest
         // link is visible without reading the numbers.
-        style: { stroke: "#94A3B8", strokeWidth: 1 + (e.weight / heaviest) * 2 },
+        style: { stroke: "#5DE4FF", strokeWidth: 1 + (e.weight / heaviest) * 2 },
       }));
 
     return { nodes, flowEdges };
@@ -141,7 +141,7 @@ export function CorrelationGraph({
           if (incident) onSelect(incident);
         }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#E5EAF0" />
+        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#394135" />
       </ReactFlow>
     </div>
   );
