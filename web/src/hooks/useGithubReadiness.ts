@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { fetchGithubRepositories, PulseGraphApiError } from "@/lib/api";
+import { fetchGithubInstallUrl, fetchGithubRepositories, PulseGraphApiError } from "@/lib/api";
 import type { GithubRepository } from "@/lib/types";
 
 /**
@@ -15,6 +15,7 @@ import type { GithubRepository } from "@/lib/types";
 export type GithubReadiness =
   | { kind: "loading" }
   | { kind: "ready"; repositories: GithubRepository[] }
+  | { kind: "app_missing"; message: string }
   | { kind: "unconfigured"; message: string }
   | { kind: "unauthorized"; message: string }
   | { kind: "backend_unavailable"; message: string }
@@ -38,7 +39,28 @@ export function useGithubReadiness() {
     const load = async () => {
       let next: GithubReadiness;
       try {
-        next = { kind: "ready", repositories: await fetchGithubRepositories() };
+        const repositories = await fetchGithubRepositories();
+
+        // An empty list is ambiguous: the App may exist with nothing selected,
+        // or it may never have been created at all. Both return 200 with []
+        // because that route only reads PulseGraph's own table. The install
+        // URL is what tells them apart -- it needs GITHUB_APP_SLUG, so a 503
+        // here means there is no App to install yet.
+        if (repositories.length === 0) {
+          try {
+            await fetchGithubInstallUrl();
+          } catch {
+            next = {
+              kind: "app_missing",
+              message:
+                "No GitHub App has been created for PulseGraph yet, so there is nothing to install. Signing in to this dashboard with GitHub is a separate thing: it proves who you are, it does not grant access to any repository.",
+            };
+            if (!cancelled) setReadiness(next);
+            return;
+          }
+        }
+
+        next = { kind: "ready", repositories };
       } catch (error) {
         next = classify(error);
       }
@@ -145,6 +167,7 @@ export function investigationAvailability(
   switch (readiness.kind) {
     case "loading":
       return { enabled: false, explanation: "Checking the GitHub connection…" };
+    case "app_missing":
     case "unconfigured":
     case "unauthorized":
     case "backend_unavailable":
