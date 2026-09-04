@@ -1,11 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchIncidentsSince } from "@/lib/api";
+import { fetchIncidentsSince, streamUrl } from "@/lib/api";
 import { normalizeEdge, normalizeIncident } from "@/lib/types";
 import type { Incident, IncidentEdge } from "@/lib/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 const POLL_INTERVAL_MS = 4000;
 
 export type StreamState = "connecting" | "live" | "polling" | "offline";
@@ -17,7 +16,12 @@ type SnapshotPayload = {
 };
 
 /**
- * Consumes GET /v1/stream.
+ * Consumes GET /v1/stream through the same-origin proxy at /api/stream.
+ *
+ * The subscription is same-origin because EventSource sends no CORS
+ * preflight and the backend sets no CORS headers — pointed at the backend
+ * directly it would simply never open, and silently fall through to the
+ * polling path below.
  *
  * The backend assigns every event a monotonic `streamId` (see
  * src/stream/sse_broker.py), so reconnects resume with `?after=<id>` and no
@@ -122,9 +126,18 @@ export function usePulseGraphStream() {
     };
 
     try {
-      const url = new URL("/v1/stream", API_BASE);
-      if (cursorRef.current > 0) url.searchParams.set("after", String(cursorRef.current));
-      source = new EventSource(url.toString());
+      source = new EventSource(streamUrl(cursorRef.current));
+
+      // An open connection is itself the liveness signal. The backend only
+      // emits its initial snapshot when `stream_id > cursor`, so against an
+      // empty database the first thing to arrive is a keepalive comment — and
+      // waiting for a data event would leave a perfectly healthy stream
+      // reported as "Offline", stuck loading forever.
+      source.onopen = () => {
+        setState("live");
+        setLoading(false);
+        setLastUpdated(new Date());
+      };
 
       source.addEventListener("snapshot", (event) => {
         const data = parse(event as MessageEvent) as SnapshotPayload | null;

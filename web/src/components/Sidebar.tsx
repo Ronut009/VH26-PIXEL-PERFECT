@@ -7,6 +7,7 @@ export type ViewKey =
   | "correlations"
   | "deliveries"
   | "audit"
+  | "github"
   | "settings";
 
 const S = {
@@ -70,6 +71,13 @@ function IconLedger() {
     </svg>
   );
 }
+function IconCode() {
+  return (
+    <svg {...S}>
+      <path d="m6 5.5-3.5 2.5 3.5 2.5M10 5.5 13.5 8 10 10.5M9.2 3.2 6.8 12.8" />
+    </svg>
+  );
+}
 function IconCog() {
   return (
     <svg {...S}>
@@ -86,14 +94,17 @@ const NAV: { key: ViewKey; label: string; icon: React.ReactNode }[] = [
   { key: "correlations", label: "Correlations", icon: <IconGraph /> },
   { key: "deliveries", label: "Deliveries", icon: <IconSend /> },
   { key: "audit", label: "Audit Ledger", icon: <IconLedger /> },
+  { key: "github", label: "Code Investigation", icon: <IconCode /> },
   { key: "settings", label: "Settings", icon: <IconCog /> },
 ];
 
 const HEALTH = [
   { label: "API", key: "api" },
   { label: "SSE Stream", key: "sse" },
-  { label: "Outbox Worker", key: "outbox" },
   { label: "Database", key: "db" },
+  // The outbox worker exposes no health endpoint, so its row reports
+  // "Unknown" rather than asserting a state inferred from the socket.
+  { label: "Outbox Worker", key: "outbox" },
 ] as const;
 
 export function Sidebar({
@@ -105,7 +116,8 @@ export function Sidebar({
   view: ViewKey;
   onView: (next: ViewKey) => void;
   connected: boolean;
-  health: Record<string, boolean>;
+  /** `null` means no endpoint reports this, which is not the same as "down". */
+  health: Record<string, boolean | null>;
 }) {
   return (
     <aside className="hidden w-60 shrink-0 flex-col border-r border-edge bg-panel lg:flex">
@@ -151,17 +163,17 @@ export function Sidebar({
           </p>
           <ul className="mt-2.5 space-y-1.5">
             {HEALTH.map((row) => {
-              const ok = health[row.key];
+              const ok = health[row.key] ?? null;
+              const dot = ok === null ? "bg-text-3" : ok ? "bg-ok" : "bg-crit";
+              const tone =
+                ok === null ? "text-text-3" : ok ? "text-[#15803D]" : "text-[#B91C1C]";
               return (
                 <li key={row.key} className="flex items-center justify-between text-[12px]">
                   <span className="text-text-2">{row.label}</span>
                   <span className="flex items-center gap-1.5">
-                    <span
-                      className={`size-1.5 rounded-full ${ok ? "bg-ok" : "bg-crit"}`}
-                      aria-hidden
-                    />
-                    <span className={ok ? "text-[#15803D]" : "text-[#B91C1C]"}>
-                      {ok ? "Healthy" : "Down"}
+                    <span className={`size-1.5 rounded-full ${dot}`} aria-hidden />
+                    <span className={tone}>
+                      {ok === null ? "Unknown" : ok ? "Healthy" : "Down"}
                     </span>
                   </span>
                 </li>
@@ -184,5 +196,46 @@ export function Sidebar({
         </div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * Navigation for the widths where the rail is hidden.
+ *
+ * Without this the whole console is unreachable below `lg` — every view but
+ * the default one has no way in on a phone or a portrait tablet.
+ */
+export function MobileNav({
+  view,
+  onView,
+}: {
+  view: ViewKey;
+  onView: (next: ViewKey) => void;
+}) {
+  return (
+    <nav
+      aria-label="Console sections"
+      className="flex gap-1 overflow-x-auto border-b border-edge bg-panel px-3 py-2 lg:hidden"
+    >
+      {NAV.map((item) => {
+        const active = view === item.key;
+        return (
+          <button
+            key={item.key}
+            type="button"
+            onClick={() => onView(item.key)}
+            aria-current={active ? "page" : undefined}
+            className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-1.5 text-[13px] transition-colors ${
+              active
+                ? "bg-brand-soft font-medium text-brand"
+                : "text-text-2 hover:bg-panel-2 hover:text-text"
+            }`}
+          >
+            <span className={active ? "text-brand" : "text-text-3"}>{item.icon}</span>
+            {item.label}
+          </button>
+        );
+      })}
+    </nav>
   );
 }

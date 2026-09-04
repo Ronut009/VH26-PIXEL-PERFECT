@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Sidebar, type ViewKey } from "@/components/Sidebar";
+import { MobileNav, Sidebar, type ViewKey } from "@/components/Sidebar";
 import { TopHeader } from "@/components/TopHeader";
 import {
   AlertVolumeChart,
@@ -10,14 +10,18 @@ import {
   QuietWindow,
   RecentActivity,
 } from "@/components/OverviewPanels";
-import { IncidentsTable } from "@/components/IncidentsTable";
+import { IncidentsTable, type SortMode } from "@/components/IncidentsTable";
 import { AuditLedger, DeliveriesTable } from "@/components/OperationalTables";
 import { CorrelationGraph } from "@/components/CorrelationGraph";
+import { CodeInvestigation } from "@/components/CodeInvestigation";
 import { IncidentDrawer } from "@/components/IncidentDrawer";
 import { usePulseGraphStream } from "@/hooks/usePulseGraphStream";
+import { useBackendHealth } from "@/hooks/useBackendHealth";
+import { investigationAvailability, useGithubReadiness } from "@/hooks/useGithubReadiness";
 import { totals } from "@/lib/metrics";
+import { serviceOf } from "@/lib/theme";
 import { DEMO_INCIDENTS, DEMO_EDGES } from "@/lib/demoData";
-import type { Incident, Lifecycle } from "@/lib/types";
+import type { Incident, Lifecycle, Severity } from "@/lib/types";
 
 const TITLES: Record<ViewKey, string> = {
   overview: "Overview",
@@ -26,15 +30,22 @@ const TITLES: Record<ViewKey, string> = {
   correlations: "Correlations",
   deliveries: "Deliveries",
   audit: "Audit Ledger",
+  github: "Code Investigation",
   settings: "Settings",
 };
 
 export default function Home() {
   const { incidents, edges, state, lastUpdated, loading } = usePulseGraphStream();
+  const backend = useBackendHealth();
+  const { readiness, reload: recheckGithub } = useGithubReadiness();
+
   const [view, setView] = useState<ViewKey>("overview");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [investigationId, setInvestigationId] = useState<string | null>(null);
   const [filter, setFilter] = useState<Lifecycle | "ALL">("ALL");
   const [query, setQuery] = useState("");
+  const [severities, setSeverities] = useState<readonly Severity[]>([]);
+  const [sort, setSort] = useState<SortMode>("urgency");
 
   // Sample data appears only when the backend is unreachable, and is labelled.
   const isSample = state === "offline" && incidents.length === 0;
@@ -46,21 +57,45 @@ export default function Home() {
     () => shown.find((i) => i.incident_id === selectedId) ?? null,
     [shown, selectedId],
   );
+  const investigationTarget = useMemo(
+    () => shown.find((i) => i.incident_id === investigationId) ?? null,
+    [shown, investigationId],
+  );
 
   const select = (incident: Incident) =>
     setSelectedId((cur) => (cur === incident.incident_id ? null : incident.incident_id));
+
+  /**
+   * Hand an incident to the Code Investigation view. The drawer closes because
+   * below `lg` it covers the page entirely — leaving it open would hide the
+   * view the operator just asked for.
+   */
+  const investigate = (incident: Incident) => {
+    setInvestigationId(incident.incident_id);
+    setView("github");
+    setSelectedId(null);
+  };
 
   const t = totals(shown);
   const active = shown.filter((i) => i.status !== "RESOLVED").length;
   const critical = shown.filter((i) => i.severity === "critical").length;
   const consolidated = t.alertsIn - t.surfaced;
 
-  const health = {
-    api: connected,
-    sse: state === "live",
-    outbox: connected,
-    db: connected,
+  // Reported, not inferred: API and Database come from GET /v1/health, and the
+  // outbox worker has no health endpoint, so it says so rather than guessing.
+  const health: Record<string, boolean | null> = {
+    api: backend.state === "unknown" ? null : backend.apiReachable,
+    sse: state === "connecting" ? null : state === "live",
+    db: backend.state === "unknown" ? null : backend.databaseHealthy,
+    outbox: null,
   };
+
+  const githubSummary =
+    readiness.kind === "ready"
+      ? `${readiness.repositories.length} repositories readable`
+      : readiness.kind === "loading"
+        ? "checking"
+        : readiness.kind;
 
   return (
     <div className="flex h-dvh bg-app">
@@ -68,14 +103,23 @@ export default function Home() {
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <TopHeader title={TITLES[view]} connected={connected} lastEvent={lastUpdated} />
+        <MobileNav view={view} onView={setView} />
 
         <main className="flex min-h-0 flex-1">
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="mx-auto max-w-[1400px] px-6 py-6">
+            <div className="mx-auto max-w-[1400px] px-4 py-5 sm:px-6 sm:py-6">
               {isSample && (
                 <p className="mb-5 rounded-md border border-edge bg-[#FFFBEB] px-4 py-2.5 text-[12px] text-[#B45309]">
                   Backend unreachable. Showing sample incidents so the console stays inspectable.
                   Every figure below is derived from these records.
+                  {backend.action ? ` ${backend.action}` : ""}
+                </p>
+              )}
+
+              {!isSample && backend.state === "degraded" && backend.message && (
+                <p className="mb-5 rounded-md border border-[#FDE68A] bg-[#FFFBEB] px-4 py-2.5 text-[12px] text-[#B45309]">
+                  {backend.message}
+                  {backend.action ? ` ${backend.action}` : ""}
                 </p>
               )}
 
@@ -182,6 +226,10 @@ export default function Home() {
                     onFilter={setFilter}
                     query={query}
                     onQuery={setQuery}
+                    severities={severities}
+                    onSeverities={setSeverities}
+                    sort={sort}
+                    onSort={setSort}
                   />
                 </div>
               )}
@@ -238,6 +286,14 @@ export default function Home() {
                 </div>
               )}
 
+              {view === "github" && (
+                <CodeInvestigation
+                  readiness={readiness}
+                  onRetry={recheckGithub}
+                  target={investigationTarget}
+                />
+              )}
+
               {view === "settings" && (
                 <div className="space-y-5">
                   <div>
@@ -246,20 +302,53 @@ export default function Home() {
                       Connection and data source for this dashboard session.
                     </p>
                   </div>
-                  <Panel title="Connection">
+                  <Panel
+                    title="Connection"
+                    hint="The browser talks only to this app; the Next.js server talks to the backend"
+                  >
                     <dl className="divide-y divide-edge text-[13px]">
                       {[
-                        ["Stream endpoint", "GET /v1/stream"],
-                        ["Fallback endpoint", "GET /v1/incidents/recent"],
-                        ["Connection state", state],
+                        ["Stream endpoint", "GET /api/stream → /v1/stream"],
+                        ["Fallback endpoint", "GET /api/incidents/recent → /v1/incidents/recent"],
+                        ["Health endpoint", "GET /api/health → /v1/health"],
+                        ["Stream state", state],
+                        ["Backend health", backend.state],
+                        ["GitHub investigation", githubSummary],
                         ["Data source", isSample ? "sample" : "backend"],
                       ].map(([label, value]) => (
                         <div key={label} className="flex justify-between gap-4 py-2.5">
                           <dt className="text-text-2">{label}</dt>
-                          <dd className="font-mono text-text">{value}</dd>
+                          <dd className="text-right font-mono text-text">{value}</dd>
                         </div>
                       ))}
                     </dl>
+                    {backend.message && (
+                      <p className="mt-3 text-[12px] text-[#B45309]">
+                        {backend.message}
+                        {backend.action ? ` ${backend.action}` : ""}
+                      </p>
+                    )}
+                  </Panel>
+
+                  <Panel title="Credentials" hint="Where each value is read, and by what">
+                    <dl className="divide-y divide-edge text-[13px]">
+                      <div className="flex justify-between gap-4 pb-2.5">
+                        <dt className="text-text-2">PULSEGRAPH_API_BASE</dt>
+                        <dd className="text-right text-text">
+                          Server only. Read by the route handlers.
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-4 pt-2.5">
+                        <dt className="text-text-2">GITHUB_ADMIN_TOKEN</dt>
+                        <dd className="text-right text-text">
+                          Server only. Attached after the request leaves the browser.
+                        </dd>
+                      </div>
+                    </dl>
+                    <p className="mt-3 text-[12px] text-text-2">
+                      Neither value carries a <span className="font-mono">NEXT_PUBLIC_</span>{" "}
+                      prefix, so neither is present in the client bundle.
+                    </p>
                   </Panel>
                 </div>
               )}
@@ -273,6 +362,12 @@ export default function Home() {
               edges={shownEdges}
               onSelect={select}
               onClose={() => setSelectedId(null)}
+              onInvestigate={investigate}
+              investigation={investigationAvailability(
+                readiness,
+                serviceOf(selected.title),
+                isSample,
+              )}
             />
           )}
         </main>

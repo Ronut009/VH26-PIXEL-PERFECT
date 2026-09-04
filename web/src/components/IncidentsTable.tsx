@@ -1,6 +1,7 @@
 "use client";
 
 import { relativeTime } from "@/lib/format";
+import { SEVERITY_ORDER } from "@/lib/metrics";
 import {
   LIFECYCLE,
   LIFECYCLE_ORDER,
@@ -10,7 +11,31 @@ import {
   rootCauseOf,
   routeLabel,
 } from "@/lib/theme";
-import type { Incident, Lifecycle } from "@/lib/types";
+import type { Incident, Lifecycle, Severity } from "@/lib/types";
+
+export type SortMode = "urgency" | "recent" | "volume";
+
+export const SORT_LABEL: Record<SortMode, string> = {
+  urgency: "Most urgent",
+  recent: "Newest first",
+  volume: "Most alerts",
+};
+
+const SORTS: Record<SortMode, (a: Incident, b: Incident) => number> = {
+  urgency: byUrgency,
+  recent: (a, b) => b.updated_at.localeCompare(a.updated_at) || byUrgency(a, b),
+  volume: (a, b) => b.alert_count - a.alert_count || byUrgency(a, b),
+};
+
+/** Search covers everything an operator can read on the row, not just the title. */
+function matchesQuery(incident: Incident, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return [incident.title, incident.summary ?? "", incident.root_cause_hint ?? ""]
+    .join(" ")
+    .toLowerCase()
+    .includes(needle);
+}
 
 function Badge({ className, children }: { className: string; children: React.ReactNode }) {
   return (
@@ -31,6 +56,10 @@ export function IncidentsTable({
   onFilter,
   query,
   onQuery,
+  severities,
+  onSeverities,
+  sort,
+  onSort,
 }: {
   incidents: Incident[];
   loading: boolean;
@@ -40,6 +69,11 @@ export function IncidentsTable({
   onFilter: (next: Lifecycle | "ALL") => void;
   query: string;
   onQuery: (next: string) => void;
+  /** Empty means every severity. */
+  severities: readonly Severity[];
+  onSeverities: (next: readonly Severity[]) => void;
+  sort: SortMode;
+  onSort: (next: SortMode) => void;
 }) {
   const counts = LIFECYCLE_ORDER.reduce<Record<string, number>>((acc, state) => {
     acc[state] = incidents.filter((i) => i.status === state).length;
@@ -48,8 +82,11 @@ export function IncidentsTable({
 
   const rows = incidents
     .filter((i) => filter === "ALL" || i.status === filter)
-    .filter((i) => (query ? i.title.toLowerCase().includes(query.toLowerCase()) : true))
-    .sort(byUrgency);
+    .filter((i) => severities.length === 0 || severities.includes(i.severity))
+    .filter((i) => matchesQuery(i, query))
+    .sort(SORTS[sort]);
+
+  const filtered = query.trim() !== "" || severities.length > 0 || filter !== "ALL";
 
   const tabs: { key: Lifecycle | "ALL"; label: string; count: number }[] = [
     { key: "ALL", label: "All", count: incidents.length },
@@ -86,7 +123,51 @@ export function IncidentsTable({
           })}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <fieldset className="flex flex-wrap items-center gap-1">
+            <legend className="sr-only">Filter by severity</legend>
+            {SEVERITY_ORDER.map((severity) => {
+              const on = severities.includes(severity);
+              return (
+                <button
+                  key={severity}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() =>
+                    onSeverities(
+                      on
+                        ? severities.filter((item) => item !== severity)
+                        : [...severities, severity],
+                    )
+                  }
+                  className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] transition-colors ${
+                    on
+                      ? "border-brand/40 bg-brand-soft font-medium text-brand"
+                      : "border-edge text-text-2 hover:bg-panel-2 hover:text-text"
+                  }`}
+                >
+                  <span className={`size-1.5 rounded-full ${SEVERITY[severity].dot}`} aria-hidden />
+                  {SEVERITY[severity].label}
+                </button>
+              );
+            })}
+          </fieldset>
+
+          <label className="flex items-center gap-1.5">
+            <span className="sr-only">Sort incidents</span>
+            <select
+              value={sort}
+              onChange={(event) => onSort(event.target.value as SortMode)}
+              className="rounded-md border border-edge bg-panel px-2.5 py-1.5 text-[13px] text-text focus:border-brand focus:outline-none"
+            >
+              {(Object.keys(SORT_LABEL) as SortMode[]).map((mode) => (
+                <option key={mode} value={mode}>
+                  {SORT_LABEL[mode]}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <label className="relative">
             <span className="sr-only">Search incidents</span>
             <input
@@ -108,6 +189,20 @@ export function IncidentsTable({
               <path d="m10.5 10.5 3 3" strokeLinecap="round" />
             </svg>
           </label>
+
+          {filtered && (
+            <button
+              type="button"
+              onClick={() => {
+                onFilter("ALL");
+                onSeverities([]);
+                onQuery("");
+              }}
+              className="rounded-md border border-edge px-2.5 py-1.5 text-[12px] text-text-2 transition-colors hover:bg-panel-2 hover:text-text"
+            >
+              Clear
+            </button>
+          )}
         </div>
       </div>
 
@@ -208,9 +303,13 @@ export function IncidentsTable({
 
         {!loading && rows.length === 0 && (
           <div className="px-5 py-14 text-center">
-            <p className="text-[13px] font-medium text-text">No incidents match this view</p>
+            <p className="text-[13px] font-medium text-text">
+              {filtered ? "No incidents match these filters" : "No incidents yet"}
+            </p>
             <p className="mt-1 text-[12px] text-text-2">
-              Alerts posted to /v1/ingest appear here once deduplicated.
+              {filtered
+                ? "Clear the search, severity or lifecycle selection to widen the view."
+                : "Alerts posted to /v1/ingest appear here once deduplicated."}
             </p>
           </div>
         )}

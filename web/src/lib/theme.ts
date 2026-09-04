@@ -120,8 +120,30 @@ export function burstMeaning(rate: number): string {
   return "No longer firing";
 }
 
+/**
+ * The service named by an incident title.
+ *
+ * The engine builds titles as `${service} — ${alertname}` with an em dash
+ * (src/engine/process_event.py); demo incidents use a middot. Both separators
+ * are accepted, because matching only one silently returns the whole title —
+ * which is also the string the GitHub service-to-repository mapping is looked
+ * up by.
+ */
+const TITLE_SEPARATOR = /\s+[—·]\s+/;
+
+export function serviceOf(title: string): string {
+  const [service] = title.split(TITLE_SEPARATOR);
+  return (service ?? title).trim() || title;
+}
+
+/** The alert rule a title names, when it carries one. */
+export function alertnameOf(title: string): string | null {
+  const parts = title.split(TITLE_SEPARATOR);
+  if (parts.length < 2) return null;
+  return parts.slice(1).join(" — ").trim() || null;
+}
+
 /** Root cause service, taken from the incident title prefix used by the engine. */
 export function rootCauseOf(title: string): string {
-  const [service] = title.split("·");
-  return (service ?? title).trim();
+  return serviceOf(title);
 }
