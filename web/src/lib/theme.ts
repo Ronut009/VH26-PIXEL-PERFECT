@@ -148,25 +148,45 @@ export function rootCauseOf(title: string): string {
   return serviceOf(title);
 }
 
+/** Current backend hint: `<incident title> (confidence 94%)`. */
+const CONFIDENCE_HINT = /\(confidence \d+%\)$/;
+
+/** Pre-confidence backend hint, kept for rows written before the change. */
+const LEGACY_HINT =
+  /^root_cause=([0-9a-fA-F-]{36});\s*outbound_decayed_joint_weight=([\d.]+)$/;
+
 /**
  * Turn the ranker's hint into something an engineer can read.
  *
- * `rank_root_cause` (src/graph/root_cause_ranker.py) emits
- * `root_cause=<incident uuid>; outbound_decayed_joint_weight=<score>`, which is
- * precise and completely opaque on screen. Resolving the UUID against the
- * incidents already loaded turns it into the incident's name; anything that
- * does not match the expected shape is passed through untouched rather than
- * dropped, so a future hint format still shows up.
+ * The backend used to emit `root_cause=<uuid>; outbound_decayed_joint_weight=
+ * <score>` and leave the resolving to us, which is why the legacy branch below
+ * looks the incident up by id. It now does that work itself and emits
+ * `<incident title> (confidence 94%)`, for two reasons: a bare UUID and a raw
+ * weight tell a responder nothing at 3am, and the same string is rendered
+ * verbatim on the Slack card, where there is no incident list to resolve
+ * against.
+ *
+ * The confidence matters as much as the name. The ranker now declines to
+ * answer when the evidence is thin — a hint that is present is one it was
+ * willing to stand behind, and the percentage says how far.
+ *
+ * Both shapes are handled, and anything unrecognised is still passed through
+ * untouched rather than dropped, so a future format keeps showing up.
  */
 export function describeRootCause(
   hint: string | null,
   incidents: { incident_id: string; title: string }[],
 ): string | null {
   if (!hint) return null;
-  const match = /^root_cause=([0-9a-fA-F-]{36});\s*outbound_decayed_joint_weight=([\d.]+)$/.exec(
-    hint.trim(),
-  );
-  if (!match) return hint;
+  const trimmed = hint.trim();
+  if (!trimmed) return null;
+
+  if (CONFIDENCE_HINT.test(trimmed)) {
+    return `Likely root cause: ${trimmed}`;
+  }
+
+  const match = LEGACY_HINT.exec(trimmed);
+  if (!match) return trimmed;
 
   const [, incidentId, weight] = match;
   const cause = incidents.find((incident) => incident.incident_id === incidentId);
