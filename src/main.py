@@ -9,6 +9,7 @@ from src.db.connection import Database, get_reader_connection
 from src.db.writer import DbWriter
 from src.ingest.prometheus import normalize_prometheus
 from src.outbox.worker import OutboxWorker
+from src.stream.sse_broker import create_sse_router
 from src.utils.logging import configure_logging, get_logger
 
 configure_logging()
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Alert Fatigue Buster — Ingest Spine", lifespan=lifespan)
+app.include_router(create_sse_router(settings.DATABASE_PATH))
 
 
 @app.post("/v1/ingest/prometheus")

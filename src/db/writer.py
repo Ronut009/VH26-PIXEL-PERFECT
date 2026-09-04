@@ -6,8 +6,7 @@ import aiosqlite
 import logging
 
 from src.contracts import NormalizedEvent
-from src.engine.db_adapter import persist_decision
-from src.engine.process_event import process_event as process_engine_event
+from src.engine.process_event import persist_and_observe, process_event as process_engine_event
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,7 @@ class DbWriter:
         await db_conn.execute("BEGIN IMMEDIATE")
         try:
             decision = await process_engine_event(db_conn, event)
-            await persist_decision(db_conn, decision)
+            decision = await persist_and_observe(db_conn, decision)
             async with db_conn.execute(
                 "SELECT seq, row_hash FROM raw_events WHERE event_id = ?",
                 (str(event.event_id),),
@@ -52,4 +51,5 @@ class DbWriter:
             "is_duplicate": decision.is_duplicate,
             "status": decision.state,
             "quiet_at_ms": decision.quiet_at_ms,
+            "root_cause_hint": decision.root_cause_hint,
         }

@@ -13,9 +13,11 @@ from src.contracts import CardChange, DeliveryIntent, EngineDecision, Normalized
 
 from .adaptive_ewma import calculate_quiet_deadline
 from .critical_bypass import classify_protected_critical
-from .db_adapter import IncidentRecord, lookup_incident
+from .db_adapter import IncidentRecord, lookup_incident, persist_decision
 from .dedupe import generate_fingerprint, is_exact_duplicate
 from .incident_machine import transition_state
+from src.graph.observe_incident import observe_incident
+from src.graph.root_cause_ranker import rank_root_cause
 
 
 _SEVERITY_MAP: dict[str, Severity] = {
@@ -27,6 +29,7 @@ _SEVERITY_MAP: dict[str, Severity] = {
     "info": "low",
     "low": "low",
 }
+_ACTIVE_STATES = ("OPEN", "ACKNOWLEDGED", "QUIESCENT")
 
 
 def _event_time_ms(event: NormalizedEvent) -> int:
@@ -270,4 +273,35 @@ async def process_event(
     )
 
 
-__all__ = ["process_event"]
+async def persist_and_observe(
+    transaction_obj: aiosqlite.Connection, decision: EngineDecision
+) -> EngineDecision:
+    """Persist an engine decision, then derive graph evidence in the same transaction."""
+
+    await persist_decision(transaction_obj, decision)
+    if decision.is_critical_bypass:
+        return decision
+
+    placeholders = ", ".join("?" for _ in _ACTIVE_STATES)
+    async with transaction_obj.execute(
+        f"""
+        SELECT stable_fingerprint
+        FROM incidents
+        WHERE scope_key = ? AND status IN ({placeholders})
+        """,
+        (decision.scope_key, *_ACTIVE_STATES),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    fingerprints = tuple(row["stable_fingerprint"] for row in rows)
+    await observe_incident(transaction_obj, decision.incident_id, fingerprints)
+
+    decision.root_cause_hint = await rank_root_cause(transaction_obj)
+    if decision.root_cause_hint is not None:
+        await transaction_obj.execute(
+            "UPDATE incidents SET root_cause_hint = ? WHERE incident_id = ?",
+            (decision.root_cause_hint, str(decision.incident_id)),
+        )
+    return decision
+
+
+__all__ = ["persist_and_observe", "process_event"]
