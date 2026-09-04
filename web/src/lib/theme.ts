@@ -147,3 +147,32 @@ export function alertnameOf(title: string): string | null {
 export function rootCauseOf(title: string): string {
   return serviceOf(title);
 }
+
+/**
+ * Turn the ranker's hint into something an engineer can read.
+ *
+ * `rank_root_cause` (src/graph/root_cause_ranker.py) emits
+ * `root_cause=<incident uuid>; outbound_decayed_joint_weight=<score>`, which is
+ * precise and completely opaque on screen. Resolving the UUID against the
+ * incidents already loaded turns it into the incident's name; anything that
+ * does not match the expected shape is passed through untouched rather than
+ * dropped, so a future hint format still shows up.
+ */
+export function describeRootCause(
+  hint: string | null,
+  incidents: { incident_id: string; title: string }[],
+): string | null {
+  if (!hint) return null;
+  const match = /^root_cause=([0-9a-fA-F-]{36});\s*outbound_decayed_joint_weight=([\d.]+)$/.exec(
+    hint.trim(),
+  );
+  if (!match) return hint;
+
+  const [, incidentId, weight] = match;
+  const cause = incidents.find((incident) => incident.incident_id === incidentId);
+  const score = Number(weight);
+  const strength = Number.isFinite(score) ? ` (joint weight ${score.toFixed(1)})` : "";
+  return cause
+    ? `Likely root cause: ${cause.title}${strength}`
+    : `Likely root cause: an incident no longer in view${strength}`;
+}

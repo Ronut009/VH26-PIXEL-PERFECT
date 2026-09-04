@@ -8,6 +8,7 @@ import {
   ROUTE_BADGE,
   SEVERITY,
   byUrgency,
+  describeRootCause,
   rootCauseOf,
   routeLabel,
 } from "@/lib/theme";
@@ -260,9 +261,9 @@ export function IncidentsTable({
                             <p className="truncate text-[13px] font-medium text-text">
                               {incident.title}
                             </p>
-                            {incident.root_cause_hint && (
+                            {describeRootCause(incident.root_cause_hint, incidents) && (
                               <p className="mt-0.5 truncate text-[12px] text-text-2">
-                                {incident.root_cause_hint}
+                                {describeRootCause(incident.root_cause_hint, incidents)}
                               </p>
                             )}
                           </div>

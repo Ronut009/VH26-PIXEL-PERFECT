@@ -8,6 +8,7 @@ import {
   ROUTE_BADGE,
   SEVERITY,
   burstMeaning,
+  describeRootCause,
   routeLabel,
   routingReason,
 } from "@/lib/theme";
@@ -223,8 +224,10 @@ export function IncidentDrawer({
         </Block>
 
         <Block title="Root cause">
-          {incident.root_cause_hint && (
-            <p className="mb-3 text-[13px] text-text">{incident.root_cause_hint}</p>
+          {describeRootCause(incident.root_cause_hint, incidents) && (
+            <p className="mb-3 text-[13px] text-text">
+              {describeRootCause(incident.root_cause_hint, incidents)}
+            </p>
           )}
           <p className="mb-1 text-[12px] text-text-2">Upstream</p>
           <Related

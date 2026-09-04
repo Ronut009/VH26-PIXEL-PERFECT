@@ -46,11 +46,25 @@ export function CorrelationGraph({
   const byId = useMemo(() => new Map(incidents.map((i) => [i.incident_id, i])), [incidents]);
 
   const { nodes, flowEdges } = useMemo(() => {
+    // When two incidents keep firing together the engine records a directed
+    // edge each way, so the raw set is cyclic: every node has a parent, and
+    // "cause above effect" cannot be layered from it. Keep the heavier
+    // direction of each pair -- the same outbound joint weight the backend's
+    // root-cause ranker scores on -- which yields an acyclic graph whose
+    // vertical order actually means something.
+    const dominant = new Map<string, IncidentEdge>();
+    for (const edge of edges) {
+      const pair = [edge.src_incident_id, edge.dst_incident_id].sort().join("|");
+      const held = dominant.get(pair);
+      if (!held || edge.weight > held.weight) dominant.set(pair, edge);
+    }
+    const directed = Array.from(dominant.values());
+
     const ids = Array.from(
-      new Set(edges.flatMap((e) => [e.src_incident_id, e.dst_incident_id])),
+      new Set(directed.flatMap((e) => [e.src_incident_id, e.dst_incident_id])),
     ).filter((id) => byId.has(id));
 
-    const depth = layerNodes(ids, edges);
+    const depth = layerNodes(ids, directed);
     const perRow = new Map<number, number>();
 
     const nodes: Node[] = ids.map((id) => {
@@ -79,14 +93,22 @@ export function CorrelationGraph({
       };
     });
 
-    const flowEdges: Edge[] = edges
+    const heaviest = Math.max(1, ...directed.map((e) => e.weight));
+    const flowEdges: Edge[] = directed
       .filter((e) => byId.has(e.src_incident_id) && byId.has(e.dst_incident_id))
       .map((e) => ({
         id: `${e.src_incident_id}->${e.dst_incident_id}`,
         source: e.src_incident_id,
         target: e.dst_incident_id,
         animated: false,
-        style: { stroke: "#94A3B8", strokeWidth: 1.5 },
+        label: e.weight.toFixed(1),
+        labelShowBg: true,
+        labelBgPadding: [4, 2] as [number, number],
+        labelBgStyle: { fill: "#FFFFFF", stroke: "#E5EAF0" },
+        labelStyle: { fill: "#64748B", fontSize: 11 },
+        // Thicker means the two fired together more often, so the strongest
+        // link is visible without reading the numbers.
+        style: { stroke: "#94A3B8", strokeWidth: 1 + (e.weight / heaviest) * 2 },
       }));
 
     return { nodes, flowEdges };

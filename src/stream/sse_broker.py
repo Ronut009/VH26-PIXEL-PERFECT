@@ -30,6 +30,12 @@ class StreamEvent:
 
 
 def _incident_payload(row: aiosqlite.Row) -> dict[str, Any]:
+    # The dashboard renders entirely from the stream once it connects, so an
+    # incident here has to be as complete as one from GET /v1/incidents/recent.
+    # Omitting the routing decision and the timestamps made several panels
+    # quietly wrong rather than empty: every incident read as "not delivered",
+    # the alert-volume chart had nothing to bucket by, and the EWMA rate showed
+    # zero for incidents that were actively firing.
     return {
         "incident": {
             "incidentId": row["incident_id"],
@@ -40,6 +46,11 @@ def _incident_payload(row: aiosqlite.Row) -> dict[str, Any]:
             "alertCount": row["alert_count"],
             "quietAtMs": row["quiet_at_ms"],
             "rootCauseHint": row["root_cause_hint"],
+            "routeDecision": row["route_decision"],
+            "ewmaRate": row["ewma_rate"],
+            "firstAlertAt": row["first_alert_at"],
+            "lastAlertAt": row["last_alert_at"],
+            "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
         }
     }
@@ -59,7 +70,8 @@ async def read_snapshot(
     async with tx.execute(
         """
         SELECT incident_id, title, summary, severity, status, alert_count,
-               quiet_at_ms, root_cause_hint, updated_at
+               quiet_at_ms, root_cause_hint, route_decision, ewma_rate,
+               first_alert_at, last_alert_at, created_at, updated_at
         FROM incidents
         ORDER BY updated_at DESC
         LIMIT ?
@@ -100,7 +112,8 @@ async def _incident_for_event(tx: aiosqlite.Connection, incident_id: str) -> aio
     async with tx.execute(
         """
         SELECT incident_id, title, summary, severity, status, alert_count,
-               quiet_at_ms, root_cause_hint, updated_at
+               quiet_at_ms, root_cause_hint, route_decision, ewma_rate,
+               first_alert_at, last_alert_at, created_at, updated_at
         FROM incidents
         WHERE incident_id = ?
         """,
