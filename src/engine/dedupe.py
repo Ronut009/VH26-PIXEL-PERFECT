@@ -69,7 +69,6 @@ def _fingerprint_material(event: NormalizedEvent | Mapping[str, Any]) -> dict[st
         "service": str(payload.get("service", "")),
         "alertname": str(payload.get("alertname", "")),
         "severity": str(payload.get("severity", payload.get("severity_raw", ""))),
-        "status": str(payload.get("status", "")),
         "labels": _stable_labels(payload.get("labels", {})),
     }
 

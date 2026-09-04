@@ -1,12 +1,15 @@
-"""Acceptance criteria for PulseGraph's mathematical core and wrapper."""
+"""Acceptance criteria for PulseGraph's engine and transaction-bound adapter."""
 
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-import pytest
-from uuid import UUID, uuid4
+from pathlib import Path
+from uuid import uuid4
 
+import aiosqlite
+import pytest
+import pytest_asyncio
+
+from src.contracts import NormalizedEvent
 from src.engine.adaptive_ewma import (
     DEFAULT_INITIAL_WINDOW_MS,
     calculate_quiet_deadline,
@@ -15,10 +18,22 @@ from src.engine.critical_bypass import (
     build_bypass_artifacts,
     classify_protected_critical,
 )
+from src.engine.db_adapter import persist_decision
 from src.engine.dedupe import generate_fingerprint, is_exact_duplicate
 from src.engine.incident_machine import transition_state
-from src.engine.process_event import IncidentOutcome, IncidentSnapshot, process_event
+from src.engine.process_event import process_event
 from src.engine.timer_wheel import TimerWheel
+
+SCHEMA_PATH = Path(__file__).parent.parent / "src" / "db" / "schema.sql"
+
+
+@pytest_asyncio.fixture
+async def engine_db() -> aiosqlite.Connection:
+    connection = await aiosqlite.connect(":memory:")
+    connection.row_factory = aiosqlite.Row
+    await connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    yield connection
+    await connection.close()
 
 
 def _event(**overrides: object) -> dict[str, object]:
@@ -112,7 +127,6 @@ def test_ewma_predicts_exact_deadline_for_a_stable_cadence() -> None:
 
 def test_ewma_empty_gap_returns_default_window() -> None:
     current_time = 10_000
-
     result = calculate_quiet_deadline([], 0.0, current_time)
 
     assert result == {
@@ -163,21 +177,6 @@ def test_machine_rejects_invalid_transitions(current_state: str, trigger: str) -
     assert transition_state(current_state, trigger) is None
 
 
-@dataclass(frozen=True)
-class _NormalizedEvent:
-    event_id: UUID
-    fingerprint: str
-    source: str
-    service: str
-    alertname: str
-    severity_raw: str
-    status: str
-    labels: dict[str, str]
-    message: str
-    fired_at: datetime
-    raw_payload: dict[str, object]
-
-
 def _normalized_event(
     *,
     fired_at: datetime,
@@ -188,7 +187,7 @@ def _normalized_event(
     alertname: str = "HighCPUUsage",
     message: str = "CPU above threshold",
     extra_labels: dict[str, str] | None = None,
-) -> _NormalizedEvent:
+) -> NormalizedEvent:
     labels = {
         "environment": "production",
         "cluster": "payments",
@@ -197,14 +196,14 @@ def _normalized_event(
     }
     if extra_labels:
         labels.update(extra_labels)
-    return _NormalizedEvent(
+    return NormalizedEvent(
         event_id=uuid4(),
         fingerprint="ingest-fingerprint-is-not-the-engine-key",
         source="prometheus",
         service=service,
         alertname=alertname,
         severity_raw=severity_raw,
-        status=status,
+        status=status,  # type: ignore[arg-type]
         labels=labels,
         message=message,
         fired_at=fired_at,
@@ -212,117 +211,74 @@ def _normalized_event(
     )
 
 
-@dataclass
-class _FakeTransaction:
-    candidate: IncidentSnapshot | None = None
-    lookup_calls: int = field(default=0, init=False)
-    requested_scope: str | None = field(default=None, init=False)
-
-    async def find_active_incident(
-        self, *, scope_key: str, fingerprint: str
-    ) -> IncidentSnapshot | None:
-        self.lookup_calls += 1
-        self.requested_scope = scope_key
-        return self.candidate
-
-
-def _incident_event_payload(event: _NormalizedEvent) -> dict[str, object]:
-    return {
-        "scope_key": "production/payments",
-        "service": event.service,
-        "alertname": event.alertname,
-        "severity_raw": event.severity_raw,
-        "status": event.status,
-        "labels": event.labels,
-    }
-
-
-def test_process_event_coalesces_a_duplicate_without_writing() -> None:
+@pytest.mark.asyncio
+async def test_process_event_coalesces_a_duplicate_without_writing(engine_db) -> None:
     first_at = datetime(2026, 9, 4, tzinfo=timezone.utc)
     first = _normalized_event(fired_at=first_at, pod="payment-api-a")
-    incident_id = uuid4()
-    transaction = _FakeTransaction(
-        candidate=IncidentSnapshot(
-            incident_id=incident_id,
-            state="OPEN",
-            last_event=_incident_event_payload(first),
-            last_seen_ms=int(first_at.timestamp() * 1000),
-            gap_history=(100.0, 120.0),
-            alert_count=2,
-        )
-    )
+    first_decision = await process_event(engine_db, first)
+    await persist_decision(engine_db, first_decision)
+    await engine_db.commit()
+
     retry = _normalized_event(
         fired_at=first_at + timedelta(milliseconds=100),
         pod="payment-api-b",
     )
+    outcome = await process_event(engine_db, retry)
 
-    outcome = asyncio.run(process_event(transaction, retry))
-
-    assert isinstance(outcome, IncidentOutcome)
-    assert outcome.incident_id == incident_id
+    assert outcome.incident_id == first_decision.incident_id
     assert outcome.is_duplicate is True
     assert outcome.is_critical_bypass is False
-    assert outcome.new_state == "OPEN"
+    assert outcome.state == "ACKNOWLEDGED"
     assert outcome.quiet_at_ms is not None
-    assert "DUPLICATE_COALESCED" in outcome.card_changes
-    assert transaction.lookup_calls == 1
-    assert transaction.requested_scope == "production/payments"
+    assert any(change.kind == "DUPLICATE_COALESCED" for change in outcome.card_changes)
 
 
-def test_process_event_creates_a_new_open_incident_without_transaction_writes() -> None:
-    transaction = _FakeTransaction()
+@pytest.mark.asyncio
+async def test_process_event_creates_acknowledged_incident(engine_db) -> None:
     event = _normalized_event(fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc))
 
-    outcome = asyncio.run(process_event(transaction, event))
+    outcome = await process_event(engine_db, event)
 
     assert outcome.is_duplicate is False
-    assert outcome.new_state == "OPEN"
+    assert outcome.state == "ACKNOWLEDGED"
     assert outcome.quiet_at_ms is not None
-    assert "INCIDENT_OPENED" in outcome.card_changes
-    assert transaction.lookup_calls == 1
+    assert any(change.kind == "STATE_OPEN_TO_ACKNOWLEDGED" for change in outcome.card_changes)
 
 
-def test_process_event_bypasses_lookup_and_filtering_for_protected_critical() -> None:
-    transaction = _FakeTransaction()
+@pytest.mark.asyncio
+async def test_process_event_bypasses_filtering_for_protected_critical(engine_db) -> None:
     event = _normalized_event(
         fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc), severity_raw="critical"
     )
 
-    outcome = asyncio.run(process_event(transaction, event))
+    outcome = await process_event(engine_db, event)
 
     assert outcome.is_critical_bypass is True
     assert outcome.is_duplicate is False
-    assert outcome.new_state == "OPEN"
+    assert outcome.state == "ACKNOWLEDGED"
     assert outcome.quiet_at_ms is None
-    assert outcome.card_changes == ("CRITICAL_BYPASS",)
-    assert transaction.lookup_calls == 0
-    assert {intent.provider for intent in outcome.delivery_intents} == {
-        "pagerduty",
-        "slack",
-    }
-    assert outcome.audit_entry is not None
-    assert outcome.audit_entry.decision == "CRITICAL_BYPASS"
+    assert outcome.bypass_reason == "SEVERITY_CRITICAL"
+    assert {intent.channel for intent in outcome.delivery_intents} == {"pagerduty", "slack"}
 
 
-def test_process_event_reopens_a_resolved_duplicate() -> None:
+@pytest.mark.asyncio
+async def test_process_event_reopens_a_resolved_incident(engine_db) -> None:
     first_at = datetime(2026, 9, 4, tzinfo=timezone.utc)
-    previous = _normalized_event(fired_at=first_at)
-    transaction = _FakeTransaction(
-        candidate=IncidentSnapshot(
-            incident_id=uuid4(),
-            state="RESOLVED",
-            last_event=_incident_event_payload(previous),
-            last_seen_ms=int(first_at.timestamp() * 1000),
-            gap_history=(),
-            alert_count=1,
-        )
+    first = _normalized_event(fired_at=first_at)
+    initial = await process_event(engine_db, first)
+    await persist_decision(engine_db, initial)
+    await engine_db.execute(
+        "UPDATE incidents SET status = 'RESOLVED' WHERE incident_id = ?",
+        (str(initial.incident_id),),
     )
+    await engine_db.commit()
+
     firing_again = _normalized_event(fired_at=first_at + timedelta(seconds=1))
+    outcome = await process_event(engine_db, firing_again)
 
-    outcome = asyncio.run(process_event(transaction, firing_again))
-
-    assert outcome.new_state == "OPEN"
-    assert "STATE_RESOLVED_TO_OPEN" in outcome.card_changes
+    assert outcome.incident_id == initial.incident_id
+    assert outcome.state == "ACKNOWLEDGED"
+    assert any(change.kind == "STATE_RESOLVED_TO_ACKNOWLEDGED" for change in outcome.card_changes)
 
 
 def test_timer_wheel_emits_deadlines_in_time_order() -> None:
@@ -339,7 +295,6 @@ def test_timer_wheel_emits_deadlines_in_time_order() -> None:
     assert due[0].incident_id == earlier_id
     assert due[0].trigger == "QUIET_DEADLINE"
     assert transition_state("ACKNOWLEDGED", due[0].trigger) == "QUIESCENT"
-
     assert wheel.pop_due(299) == ()
     assert wheel.pop_due(300)[0].incident_id == later_id
 
@@ -347,7 +302,6 @@ def test_timer_wheel_emits_deadlines_in_time_order() -> None:
 def test_timer_wheel_discards_stale_deadlines_after_reschedule() -> None:
     wheel = TimerWheel()
     incident_id = uuid4()
-
     wheel.schedule(incident_id, 100)
     wheel.schedule(incident_id, 200)
 
@@ -361,7 +315,6 @@ def test_timer_wheel_discards_stale_deadlines_after_reschedule() -> None:
 def test_timer_wheel_is_safe_for_concurrent_scheduling() -> None:
     wheel = TimerWheel()
     incident_ids = [uuid4() for _ in range(32)]
-
     with ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(lambda item: wheel.schedule(item, 1_000), incident_ids))
 
@@ -386,7 +339,6 @@ def test_hardcoded_protected_emergencies_bypass_filters(
         alertname=alertname,
         message=message,
     )
-
     decision = classify_protected_critical(event)
 
     assert decision.should_bypass is True
@@ -400,7 +352,6 @@ def test_p0_bypass_generates_idempotent_delivery_and_audit_artifacts() -> None:
     )
     incident_id = uuid4()
     decision = classify_protected_critical(event)
-
     intents, audit_entry = build_bypass_artifacts(event, incident_id, decision)
 
     assert decision.should_bypass is True

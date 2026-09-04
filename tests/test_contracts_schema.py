@@ -16,5 +16,16 @@ def test_contract_and_schema_use_uppercase_incident_states() -> None:
     incident_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(incidents)").fetchall()
     }
+    raw_event_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(raw_events)").fetchall()
+    }
 
-    assert "status" in incident_columns
+    assert {"status", "scope_key", "stable_fingerprint", "quiet_at_ms"}.issubset(
+        incident_columns
+    )
+    assert {
+        "scope_key",
+        "stable_fingerprint",
+        "bypass_reason",
+        "decision_payload_json",
+    }.issubset(raw_event_columns)

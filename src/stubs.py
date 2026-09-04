@@ -20,7 +20,7 @@ def _map_severity(severity_raw: str) -> str:
 async def stub_process_incident(db_conn, event: NormalizedEvent) -> IncidentDecision:
     return IncidentDecision(
         incident_id=uuid4(),
-        status="new",
+        status="ACKNOWLEDGED",
         is_duplicate=False,
         severity_final=_map_severity(event.severity_raw),
         alert_count=1,

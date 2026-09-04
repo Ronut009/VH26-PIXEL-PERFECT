@@ -1,66 +1,32 @@
-"""Data-only adapter between pure engine logic and Yash's transaction owner.
-
-The wrapper reads through a transaction protocol but never opens, commits, or
-rolls back a database connection. DbWriter remains the sole transaction owner.
-"""
+"""Transaction-bound orchestration of dedupe, lifecycle, and adaptive silence."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Mapping, Protocol
-from uuid import UUID, uuid4
+import json
+from typing import Any
+from uuid import uuid4
+
+import aiosqlite
+
+from src.contracts import CardChange, DeliveryIntent, EngineDecision, NormalizedEvent, Severity
 
 from .adaptive_ewma import calculate_quiet_deadline
-from .critical_bypass import (
-    AuditLedgerEntry,
-    DeliveryIntent,
-    build_bypass_artifacts,
-    classify_protected_critical,
-)
+from .critical_bypass import classify_protected_critical
+from .db_adapter import IncidentRecord, lookup_incident
 from .dedupe import generate_fingerprint, is_exact_duplicate
 from .incident_machine import transition_state
 
-if TYPE_CHECKING:
-    from src.contracts import NormalizedEvent
 
-
-@dataclass(frozen=True)
-class IncidentSnapshot:
-    """The minimum read model the engine needs from the transaction owner."""
-
-    incident_id: UUID
-    state: str
-    last_event: Mapping[str, Any]
-    last_seen_ms: int
-    gap_history: tuple[float, ...]
-    alert_count: int
-
-
-class IncidentTransaction(Protocol):
-    """Read-only capability required inside Yash's existing transaction."""
-
-    async def find_active_incident(
-        self, *, scope_key: str, fingerprint: str
-    ) -> IncidentSnapshot | None:
-        """Return an active candidate without creating, committing, or publishing."""
-
-
-@dataclass(frozen=True)
-class IncidentOutcome:
-    """Data returned to DbWriter for its ledger, incident, and outbox writes."""
-
-    incident_id: UUID
-    new_state: str
-    quiet_at_ms: int | None
-    card_changes: tuple[str, ...]
-    is_critical_bypass: bool
-    is_duplicate: bool
-    alert_count: int
-    mean_gap: float | None = None
-    variance: float | None = None
-    delivery_intents: tuple[DeliveryIntent, ...] = ()
-    audit_entry: AuditLedgerEntry | None = None
+_SEVERITY_MAP: dict[str, Severity] = {
+    "critical": "critical",
+    "error": "high",
+    "high": "high",
+    "warning": "medium",
+    "medium": "medium",
+    "info": "low",
+    "low": "low",
+}
 
 
 def _event_time_ms(event: NormalizedEvent) -> int:
@@ -71,15 +37,12 @@ def _event_time_ms(event: NormalizedEvent) -> int:
 
 
 def _scope_key(event: NormalizedEvent) -> str:
-    labels = event.labels
-    environment = labels.get("environment", "default")
-    cluster = labels.get("cluster", labels.get("namespace", "default"))
+    environment = event.labels.get("environment", "default")
+    cluster = event.labels.get("cluster", event.labels.get("namespace", "default"))
     return f"{environment}/{cluster}"
 
 
 def _event_payload(event: NormalizedEvent, scope_key: str) -> dict[str, Any]:
-    """Convert the shared Pydantic model into the pure dedupe input shape."""
-
     return {
         "scope_key": scope_key,
         "service": event.service,
@@ -90,92 +53,221 @@ def _event_payload(event: NormalizedEvent, scope_key: str) -> dict[str, Any]:
     }
 
 
-def _next_state(current_state: str, event_status: str) -> str:
-    if event_status == "resolved":
-        return transition_state(current_state, "RESOLVE") or current_state
-    if current_state == "RESOLVED":
-        return transition_state(current_state, "REOPEN") or current_state
-    return current_state
+def _severity(event: NormalizedEvent) -> Severity:
+    return _SEVERITY_MAP.get(event.severity_raw.lower(), "medium")
+
+
+def _payload_json(
+    *,
+    event: NormalizedEvent,
+    incident_id: str,
+    state: str,
+    is_duplicate: bool,
+    bypass_reason: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "event_id": str(event.event_id),
+            "incident_id": incident_id,
+            "state": state,
+            "is_duplicate": is_duplicate,
+            "bypass_reason": bypass_reason,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _slack_intent(
+    event: NormalizedEvent, incident_id: str, action: str, payload: dict[str, Any]
+) -> DeliveryIntent:
+    return DeliveryIntent(
+        channel="slack",
+        action=action,  # type: ignore[arg-type]
+        idempotency_key=f"card:{event.event_id}:{incident_id}:{action}",
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _decision(
+    *,
+    event: NormalizedEvent,
+    incident_id: str,
+    state: str,
+    is_duplicate: bool,
+    scope_key: str,
+    stable_fingerprint: str,
+    quiet_at_ms: int | None,
+    mean_gap: float,
+    variance: float,
+    gap_history: list[float],
+    card_changes: list[str],
+    alert_count: int,
+    is_critical_bypass: bool = False,
+    bypass_reason: str | None = None,
+    delivery_intents: list[DeliveryIntent] | None = None,
+) -> EngineDecision:
+    return EngineDecision(
+        event=event,
+        incident_id=incident_id,
+        state=state,  # type: ignore[arg-type]
+        is_duplicate=is_duplicate,
+        severity_final="critical" if is_critical_bypass else _severity(event),
+        alert_count=alert_count,
+        title=f"{event.service} — {event.alertname}",
+        summary=event.message,
+        scope_key=scope_key,
+        stable_fingerprint=stable_fingerprint,
+        quiet_at_ms=quiet_at_ms,
+        ewma_mean_gap=mean_gap,
+        ewma_variance=variance,
+        gap_history=gap_history,
+        card_changes=[CardChange(kind=change) for change in card_changes],
+        is_critical_bypass=is_critical_bypass,
+        bypass_reason=bypass_reason,
+        decision_payload_json=_payload_json(
+            event=event,
+            incident_id=incident_id,
+            state=state,
+            is_duplicate=is_duplicate,
+            bypass_reason=bypass_reason,
+        ),
+        delivery_intents=delivery_intents or [],
+    )
+
+
+def _new_incident_state(event: NormalizedEvent) -> str:
+    if event.status == "resolved":
+        return "RESOLVED"
+    return transition_state("OPEN", "ACKNOWLEDGE") or "OPEN"
+
+
+def _next_state(record: IncidentRecord, event: NormalizedEvent) -> str:
+    if event.status == "resolved":
+        return transition_state(record.state, "RESOLVE") or record.state
+    if record.state == "RESOLVED":
+        reopened = transition_state(record.state, "REOPEN") or record.state
+        return transition_state(reopened, "ACKNOWLEDGE") or reopened
+    if record.state == "OPEN":
+        return transition_state(record.state, "ACKNOWLEDGE") or record.state
+    return record.state
 
 
 async def process_event(
-    transaction_obj: IncidentTransaction, normalized_event: NormalizedEvent
-) -> IncidentOutcome:
-    """Read an incident candidate and return the next immutable engine outcome.
-
-    Protected critical alerts intentionally bypass lookup, deduplication, EWMA,
-    and lifecycle filtering. Every non-critical event is fingerprinted, checked
-    against the candidate's stable payload, and assigned a dynamic deadline.
-    """
-
-    bypass_decision = classify_protected_critical(normalized_event)
-    if bypass_decision.should_bypass:
-        incident_id = uuid4()
-        delivery_intents, audit_entry = build_bypass_artifacts(
-            normalized_event, incident_id, bypass_decision
-        )
-        return IncidentOutcome(
-            incident_id=incident_id,
-            new_state="OPEN",
-            quiet_at_ms=None,
-            card_changes=("CRITICAL_BYPASS",),
-            is_critical_bypass=True,
-            is_duplicate=False,
-            alert_count=1,
-            delivery_intents=delivery_intents,
-            audit_entry=audit_entry,
-        )
+    transaction_obj: aiosqlite.Connection, normalized_event: NormalizedEvent
+) -> EngineDecision:
+    """Read through the active transaction and return data for atomic persistence."""
 
     scope_key = _scope_key(normalized_event)
     event_payload = _event_payload(normalized_event, scope_key)
     stable_fingerprint = generate_fingerprint(event_payload)
-    candidate = await transaction_obj.find_active_incident(
-        scope_key=scope_key, fingerprint=stable_fingerprint
-    )
+    bypass = classify_protected_critical(normalized_event)
 
-    is_duplicate = candidate is not None and is_exact_duplicate(
-        event_payload, dict(candidate.last_event), scope_key
-    )
-    event_time_ms = _event_time_ms(normalized_event)
-
-    if not is_duplicate:
-        initial_state = "RESOLVED" if normalized_event.status == "firing" else "OPEN"
-        new_state = _next_state(initial_state, normalized_event.status)
-        quiet = calculate_quiet_deadline([], 0.0, event_time_ms)
-        return IncidentOutcome(
-            incident_id=uuid4(),
-            new_state=new_state,
-            quiet_at_ms=int(quiet["quiet_at_ms"]),
-            card_changes=("INCIDENT_OPENED", "QUIET_DEADLINE_UPDATED"),
-            is_critical_bypass=False,
+    if bypass.should_bypass:
+        incident_id = str(uuid4())
+        payload = {
+            "incident_id": incident_id,
+            "event_id": str(normalized_event.event_id),
+            "service": normalized_event.service,
+            "severity": "critical",
+            "bypass_reason": bypass.reason,
+        }
+        intents = [
+            DeliveryIntent(
+                channel="pagerduty",
+                action="trigger",
+                idempotency_key=f"critical:{normalized_event.event_id}:{incident_id}:pagerduty",
+                payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            ),
+            _slack_intent(normalized_event, incident_id, "create", payload),
+        ]
+        return _decision(
+            event=normalized_event,
+            incident_id=incident_id,
+            state="ACKNOWLEDGED",
             is_duplicate=False,
+            scope_key=scope_key,
+            stable_fingerprint=stable_fingerprint,
+            quiet_at_ms=None,
+            mean_gap=0.0,
+            variance=0.0,
+            gap_history=[],
+            card_changes=["CRITICAL_BYPASS", "STATE_OPEN_TO_ACKNOWLEDGED"],
             alert_count=1,
-            mean_gap=float(quiet["mean_gap"]),
-            variance=float(quiet["variance"]),
+            is_critical_bypass=True,
+            bypass_reason=bypass.reason,
+            delivery_intents=intents,
         )
 
-    assert candidate is not None
-    new_state = _next_state(candidate.state, normalized_event.status)
-    last_gap = max(0.0, float(event_time_ms - candidate.last_seen_ms))
-    quiet = calculate_quiet_deadline(
-        list(candidate.gap_history), last_gap, event_time_ms
+    record = await lookup_incident(transaction_obj, stable_fingerprint, scope_key)
+    event_time_ms = _event_time_ms(normalized_event)
+
+    if record is None:
+        state = _new_incident_state(normalized_event)
+        quiet = (
+            calculate_quiet_deadline([], 0.0, event_time_ms)
+            if state != "RESOLVED"
+            else {"quiet_at_ms": None, "mean_gap": 0.0, "variance": 0.0}
+        )
+        incident_id = str(uuid4())
+        payload = {
+            "incident_id": incident_id,
+            "state": state,
+            "alert_count": 1,
+            "service": normalized_event.service,
+        }
+        return _decision(
+            event=normalized_event,
+            incident_id=incident_id,
+            state=state,
+            is_duplicate=False,
+            scope_key=scope_key,
+            stable_fingerprint=stable_fingerprint,
+            quiet_at_ms=quiet["quiet_at_ms"],
+            mean_gap=float(quiet["mean_gap"]),
+            variance=float(quiet["variance"]),
+            gap_history=[],
+            card_changes=["INCIDENT_OPENED", "STATE_OPEN_TO_ACKNOWLEDGED"],
+            alert_count=1,
+            delivery_intents=[_slack_intent(normalized_event, incident_id, "create", payload)],
+        )
+
+    is_duplicate = is_exact_duplicate(event_payload, record.last_event, scope_key)
+    if not is_duplicate:
+        raise RuntimeError("stable fingerprint lookup returned a non-identical incident")
+
+    state = _next_state(record, normalized_event)
+    last_gap = max(0.0, float(event_time_ms - record.last_seen_ms))
+    quiet = (
+        calculate_quiet_deadline(list(record.gap_history), last_gap, event_time_ms)
+        if state != "RESOLVED"
+        else {"quiet_at_ms": None, "mean_gap": 0.0, "variance": 0.0}
     )
-
-    changes: list[str] = ["DUPLICATE_COALESCED", "QUIET_DEADLINE_UPDATED"]
-    if new_state != candidate.state:
-        changes.append(f"STATE_{candidate.state}_TO_{new_state}")
-
-    return IncidentOutcome(
-        incident_id=candidate.incident_id,
-        new_state=new_state,
-        quiet_at_ms=int(quiet["quiet_at_ms"]),
-        card_changes=tuple(changes),
-        is_critical_bypass=False,
+    incident_id = str(record.incident_id)
+    payload = {
+        "incident_id": incident_id,
+        "state": state,
+        "alert_count": record.alert_count + 1,
+        "service": normalized_event.service,
+    }
+    changes = ["DUPLICATE_COALESCED", "QUIET_DEADLINE_UPDATED"]
+    if state != record.state:
+        changes.append(f"STATE_{record.state}_TO_{state}")
+    return _decision(
+        event=normalized_event,
+        incident_id=incident_id,
+        state=state,
         is_duplicate=True,
-        alert_count=candidate.alert_count + 1,
+        scope_key=scope_key,
+        stable_fingerprint=stable_fingerprint,
+        quiet_at_ms=quiet["quiet_at_ms"],
         mean_gap=float(quiet["mean_gap"]),
         variance=float(quiet["variance"]),
+        gap_history=[*record.gap_history, last_gap],
+        card_changes=changes,
+        alert_count=record.alert_count + 1,
+        delivery_intents=[_slack_intent(normalized_event, incident_id, "update", payload)],
     )
 
 
-__all__ = ["IncidentOutcome", "IncidentSnapshot", "IncidentTransaction", "process_event"]
+__all__ = ["process_event"]

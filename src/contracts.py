@@ -1,8 +1,8 @@
 from datetime import datetime
-from typing import Literal, Optional, TypeAlias
+from typing import Any, Literal, Optional, TypeAlias
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 IncidentState: TypeAlias = Literal[
@@ -11,6 +11,20 @@ IncidentState: TypeAlias = Literal[
     "QUIESCENT",
     "RESOLVED",
 ]
+
+Severity: TypeAlias = Literal["critical", "high", "medium", "low"]
+
+
+class CardChange(BaseModel):
+    kind: str
+    value: str | None = None
+
+
+class DeliveryIntent(BaseModel):
+    channel: Literal["slack", "pagerduty", "email"]
+    action: Literal["create", "update", "resolve", "trigger"]
+    idempotency_key: str
+    payload_json: str
 
 
 class NormalizedEvent(BaseModel):
@@ -31,11 +45,38 @@ class IncidentDecision(BaseModel):
     incident_id: UUID
     status: IncidentState
     is_duplicate: bool
-    severity_final: Literal["critical", "high", "medium", "low"]
+    severity_final: Severity
     alert_count: int
     ewma_rate: float
     title: str
     summary: Optional[str] = None
+
+
+class EngineDecision(BaseModel):
+    """The complete transaction-bound engine result consumed by DbWriter."""
+
+    event: NormalizedEvent
+    incident_id: UUID
+    state: IncidentState
+    is_duplicate: bool
+    severity_final: Severity
+    alert_count: int
+    title: str
+    summary: Optional[str] = None
+
+    scope_key: str
+    stable_fingerprint: str
+    quiet_at_ms: int | None = None
+    ewma_mean_gap: float = 0.0
+    ewma_variance: float = 0.0
+    gap_history: list[float] = Field(default_factory=list)
+
+    card_changes: list[CardChange] = Field(default_factory=list)
+    is_critical_bypass: bool = False
+    bypass_reason: str | None = None
+    decision_payload_json: str = "{}"
+    delivery_intents: list[DeliveryIntent] = Field(default_factory=list)
+    root_cause_hint: str | None = None
 
 
 class GraphUpdate(BaseModel):

@@ -8,7 +8,6 @@ import pytest_asyncio
 
 from src.contracts import NormalizedEvent
 from src.db.writer import DbWriter
-from src.stubs import stub_process_incident, stub_update_graph
 
 SCHEMA_PATH = Path(__file__).parent.parent / "src" / "db" / "schema.sql"
 
@@ -45,7 +44,7 @@ async def db_conn(tmp_path):
 
 @pytest.fixture
 def writer():
-    return DbWriter(process_incident_fn=stub_process_incident, update_graph_fn=stub_update_graph)
+    return DbWriter()
 
 
 @pytest.mark.asyncio
@@ -89,9 +88,10 @@ async def test_critical_bypass_skips_incident_engine_and_routes_to_pagerduty(db_
 
     async with db_conn.execute("SELECT * FROM outbox WHERE incident_id = ?", (result["incident_id"],)) as cur:
         outbox_rows = await cur.fetchall()
-    assert len(outbox_rows) == 1
-    assert outbox_rows[0]["channel"] == "pagerduty"
-    assert outbox_rows[0]["action"] == "create"
+    assert {(row["channel"], row["action"]) for row in outbox_rows} == {
+        ("pagerduty", "create"),
+        ("slack", "create"),
+    }
 
 
 @pytest.mark.asyncio
@@ -104,7 +104,7 @@ async def test_priority_p0_also_triggers_bypass(db_conn, writer):
 
     async with db_conn.execute("SELECT * FROM outbox WHERE incident_id = ?", (result["incident_id"],)) as cur:
         outbox_rows = await cur.fetchall()
-    assert outbox_rows[0]["channel"] == "pagerduty"
+    assert {row["channel"] for row in outbox_rows} == {"pagerduty", "slack"}
 
 
 @pytest.mark.asyncio

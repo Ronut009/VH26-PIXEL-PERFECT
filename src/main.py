@@ -9,7 +9,6 @@ from src.db.connection import Database, get_reader_connection
 from src.db.writer import DbWriter
 from src.ingest.prometheus import normalize_prometheus
 from src.outbox.worker import OutboxWorker
-from src.stubs import stub_process_incident, stub_update_graph
 from src.utils.logging import configure_logging, get_logger
 
 configure_logging()
@@ -21,7 +20,7 @@ async def lifespan(app: FastAPI):
     db = Database(settings.DATABASE_PATH)
     await db.connect()
 
-    writer = DbWriter(process_incident_fn=stub_process_incident, update_graph_fn=stub_update_graph)
+    writer = DbWriter()
     worker = OutboxWorker(db)
     worker.start()
 
