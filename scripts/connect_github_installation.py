@@ -87,6 +87,25 @@ async def main() -> int:
             installation = await client.get_app_installation(installation_id)
         except GitHubIntegrationError as exc:
             print(f"[fail] GitHub rejected the installation lookup: {exc}")
+            if "401" in str(exc):
+                # A 401 here reads like a bad key, and almost never is. GitHub
+                # says "A JSON web token could not be decoded" when it cannot
+                # resolve the issuer to an App - the signature is never even
+                # checked - so the usual cause is the issuer, not the key.
+                print()
+                print("  A 401 on an App JWT is usually the issuer, not the key.")
+                print(f"  Current issuer: {settings.github_app_issuer}")
+                if not settings.GITHUB_APP_ID:
+                    print("  This is the Client ID. GitHub documents both the Client ID")
+                    print("  and the numeric App ID, but only the App ID is accepted")
+                    print("  everywhere.")
+                    print()
+                    print("  Fix: copy the App ID (a number) from")
+                    print(f"       github.com/settings/apps/{settings.GITHUB_APP_SLUG}")
+                    print("       General tab -> 'App ID', then set GITHUB_APP_ID in .env")
+                print()
+                print("  Ruled out already if you ran the diagnostics: key parses and")
+                print("  signs, matches the downloaded PEM, and the clock is in sync.")
             return 1
 
         selection = installation.get("repository_selection")
