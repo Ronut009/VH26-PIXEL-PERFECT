@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+import logging
 import time
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import aiosqlite
 
@@ -19,6 +20,7 @@ from .incident_machine import transition_state
 from .timer_wheel import TimerTrigger, TimerWheel
 
 POLL_INTERVAL_SECONDS = 0.1
+logger = logging.getLogger(__name__)
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -177,6 +179,39 @@ class TimerWorker:
             return
         self._stop_event.clear()
         self._task = asyncio.create_task(self._run(), name="pulsegraph-timer-worker")
+
+    async def recover_persisted_deadlines(self, *, now_ms: int | None = None) -> int:
+        """Rehydrate future ACKNOWLEDGED deadlines through the shared SQLite connection.
+
+        The application calls this before starting the polling task, so the query and
+        queue population form a startup boundary: no newly accepted alert can race a
+        persisted deadline recovery.
+        """
+
+        recovery_now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        async with self._database.write_lock:
+            tx = self._database.writer_conn
+            if tx is None:
+                raise RuntimeError("database writer connection is not available")
+            async with tx.execute(
+                """
+                SELECT incident_id, quiet_at_ms
+                FROM incidents
+                WHERE status = 'ACKNOWLEDGED'
+                  AND quiet_at_ms IS NOT NULL
+                  AND quiet_at_ms > ?
+                ORDER BY quiet_at_ms ASC
+                """,
+                (recovery_now_ms,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        for row in rows:
+            self._timer_wheel.schedule(UUID(row["incident_id"]), int(row["quiet_at_ms"]))
+
+        recovered_count = len(rows)
+        logger.info("timer_deadlines_recovered recovered_count=%s", recovered_count)
+        return recovered_count
 
     async def stop(self) -> None:
         self._stop_event.set()

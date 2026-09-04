@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI):
     timer_wheel = TimerWheel()
     writer = DbWriter(timer_wheel=timer_wheel)
     timer_worker = TimerWorker(db, timer_wheel)
+    recovered_deadline_count = await timer_worker.recover_persisted_deadlines()
     timer_worker.start()
     worker = OutboxWorker(db)
     worker.start()
@@ -35,7 +36,11 @@ async def lifespan(app: FastAPI):
     app.state.worker = worker
     app.state.timer_worker = timer_worker
 
-    logger.info("app_started", database_path=settings.DATABASE_PATH)
+    logger.info(
+        "app_started",
+        database_path=settings.DATABASE_PATH,
+        recovered_timer_deadlines=recovered_deadline_count,
+    )
 
     try:
         yield
