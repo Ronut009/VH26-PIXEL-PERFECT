@@ -86,10 +86,27 @@ construction, and say so:
 - A patch preview is a disposable unified diff for a human to read. Nothing in
   PulseGraph can push, commit, branch, merge, or open a pull request.
 
-"Investigate code" is disabled — with the reason shown next to it — when the
-admin token is unset, the backend rejects it, the backend is unreachable, no
-repositories are connected, the incident's service has no mapped repository,
-or the incident is sample data.
+"Investigate code" in the incident drawer is disabled — with the reason shown
+next to it — when the admin token is unset, the backend rejects it, the backend
+is unreachable, no repositories are connected, the incident's service has no
+mapped repository, or the incident is sample data. When it is enabled it hands
+the incident to the Code Investigation view.
+
+That view carries the whole workflow:
+
+1. **Connect** — fetch the App's install URL, and refresh an installation's
+   selected repository list.
+2. **Map** — bind a monitored service to a repository. Completions come from
+   the service names that actually appear on incident titles, since the backend
+   looks the mapping up by that exact name.
+3. **Pin** — snapshot a repository, then read back the commit, tree and file
+   inventory that a diagnosis will be limited to.
+4. **Diagnose** — run a bounded diagnosis for the selected incident and read
+   the hypothesis, its per-file and per-line source citations, and the proposed
+   fix. A safe fallback is shown as a first-class outcome with its reason and
+   next steps, because that is what the backend returns instead of an
+   unverified claim.
+5. **Review** — generate a unified diff and read it. Nothing applies it.
 
 ## Environment
 
@@ -106,8 +123,8 @@ the backend's address now that all traffic is same-origin.
 
 ## Not built here
 
-- Screens for GitHub setup (installing the app, mapping services, pinning
-  snapshots) and for running a diagnosis or reviewing a patch preview. The
-  proxy routes and typed client functions for all of them already exist; the
-  UI does not, and the Code Investigation view says so rather than offering
-  controls that do nothing.
+- Dashboard authentication. `GITHUB_ADMIN_TOKEN` is a single shared secret
+  guarding the management routes until real account auth exists, which is why
+  it never leaves the server.
+- Editing a patch preview, or any path that writes it anywhere. The backend
+  has no endpoint for it and this app adds none.
