@@ -342,7 +342,7 @@ async def seed(client: httpx.AsyncClient, backend: str) -> int:
 # ─────────────────────────────────────────────────────────── verification ──
 
 async def verify_pipeline(
-    client: httpx.AsyncClient, backend: str, dashboard: str
+    client: httpx.AsyncClient, backend: str, dashboard: str, seeded: bool
 ) -> list[dict[str, Any]]:
     head("4. Pipeline verification")
 
@@ -355,7 +355,21 @@ async def verify_pipeline(
         return []
 
     if not incidents:
-        fail("Pipeline produced incidents", "The storm was accepted but no incidents exist.")
+        if not seeded:
+            # Nothing was sent, so an empty database is the expected result,
+            # not a fault. Saying "the storm failed" here sent someone hunting
+            # for a bug that did not exist.
+            line(
+                WARN,
+                "No incidents to verify -- the database is empty and --skip-seed was used",
+                "Run without --skip-seed to fire the alert storm:\n"
+                "  .venv/Scripts/python.exe scripts/demo.py",
+            )
+        else:
+            fail(
+                "Pipeline produced incidents",
+                "The storm was accepted but no incidents exist. Check the backend logs.",
+            )
         return []
 
     alerts_in = sum(int(i.get("alert_count", 0)) for i in incidents)
@@ -565,22 +579,30 @@ async def github_phase(
 
 # ────────────────────────────────────────────────────────────────── reset ──
 
-def reset_pipeline_data(backend_reachable: bool) -> None:
+def reset_pipeline_data(backend_reachable: bool) -> bool:
+    """Clear the pipeline tables. Returns False when it refused to."""
+
     head("0. Reset")
     if backend_reachable:
         line(
-            WARN,
+            BAD,
             "Refusing to reset while the backend is running",
             "The engine holds in-memory quiet-deadline timers for live incidents.\n"
-            "Stop the backend, re-run with --reset, then start it again.",
+            "\n"
+            "  1) Stop the backend (close its window, or Ctrl+C in it)\n"
+            "  2) .venv/Scripts/python.exe scripts/demo.py --reset\n"
+            "  3) Start it again:\n"
+            "     .venv/Scripts/python.exe -m uvicorn src.main:app --host 127.0.0.1 --port 8000\n"
+            "  4) .venv/Scripts/python.exe scripts/demo.py",
         )
-        return
+        return False
+
     from src.config import settings  # imported here so --reset works without a live app
 
     database = REPO_ROOT / settings.DATABASE_PATH
     if not database.exists():
         line(OK, "No database to reset")
-        return
+        return True
     connection = sqlite3.connect(database)
     try:
         for table in ("outbox", "delivery_intents", "edges", "raw_events", "incidents"):
@@ -590,6 +612,7 @@ def reset_pipeline_data(backend_reachable: bool) -> None:
         line(INFO, "GitHub installations, mappings and snapshots were left alone")
     finally:
         connection.close()
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────── main ──
@@ -604,7 +627,13 @@ async def run(args: argparse.Namespace) -> int:
     async with httpx.AsyncClient(follow_redirects=False) as client:
         if args.reset:
             reachable = await wait_for(client, f"{backend}/v1/health", seconds=2) is not None
-            reset_pipeline_data(reachable)
+            # A refused reset has to stop here. Carrying on would fire a second
+            # storm onto the data the caller just asked to clear -- exactly the
+            # opposite of what they wanted, and it doubles every figure.
+            if not reset_pipeline_data(reachable):
+                head("Result")
+                print("\nNothing was reset, and nothing was sent.\n")
+                return 1
 
         _, restart_needed = configure(backend)
         await check_services(client, backend, dashboard, args.ollama.rstrip("/"), args.model)
@@ -618,7 +647,7 @@ async def run(args: argparse.Namespace) -> int:
         if not args.skip_seed:
             sent = await seed(client, backend)
 
-        incidents = await verify_pipeline(client, backend, dashboard)
+        incidents = await verify_pipeline(client, backend, dashboard, seeded=not args.skip_seed)
 
         if restart_needed:
             head("5. GitHub code investigation")
@@ -629,6 +658,14 @@ async def run(args: argparse.Namespace) -> int:
             )
         else:
             await github_phase(client, dashboard, incidents, args.service)
+
+        if not incidents:
+            head("Result")
+            print(
+                "\nNothing to show yet -- the database is empty.\n"
+                "Run the storm:  .venv/Scripts/python.exe scripts/demo.py\n"
+            )
+            return 1
 
         head("What to show the judges")
         alerts_in = sum(int(i.get("alert_count", 0)) for i in incidents)
