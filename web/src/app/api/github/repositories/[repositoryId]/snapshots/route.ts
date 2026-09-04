@@ -1,4 +1,5 @@
 import { callBackend, errorResponse, positiveInteger } from "@/server/pulsegraph";
+import { requireDashboardUser } from "@/server/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,9 @@ export async function POST(
   _request: Request,
   context: RouteContext<"/api/github/repositories/[repositoryId]/snapshots">,
 ): Promise<Response> {
+  const denied = await requireDashboardUser();
+  if (denied) return denied;
+
   const { repositoryId } = await context.params;
   const id = positiveInteger(repositoryId);
   if (id === null) {

@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { callBackend, errorResponse } from "@/server/pulsegraph";
+import { requireDashboardUser } from "@/server/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -8,6 +9,9 @@ export async function GET(
   request: NextRequest,
   context: RouteContext<"/api/github/incidents/[incidentId]/diagnoses">,
 ): Promise<Response> {
+  const denied = await requireDashboardUser();
+  if (denied) return denied;
+
   const { incidentId } = await context.params;
   if (!incidentId.trim()) {
     return errorResponse(422, "invalid_request", "An incident ID is required.");
@@ -32,6 +36,9 @@ export async function POST(
   _request: Request,
   context: RouteContext<"/api/github/incidents/[incidentId]/diagnoses">,
 ): Promise<Response> {
+  const denied = await requireDashboardUser();
+  if (denied) return denied;
+
   const { incidentId } = await context.params;
   if (!incidentId.trim()) {
     return errorResponse(422, "invalid_request", "An incident ID is required.");

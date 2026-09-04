@@ -73,6 +73,64 @@ forwarded.
   and turns every failure into operator-facing copy, which is what gates and
   explains the drawer's "Investigate code" action.
 
+## Signing in
+
+The dashboard is gated behind GitHub OAuth via Supabase Auth. An anonymous
+visitor can only ever reach `/login`; every page and every `/api/*` route
+requires a session.
+
+**This is not the same thing as the GitHub App.** They coexist and do different
+jobs:
+
+| Mechanism | Answers | Credential |
+| --- | --- | --- |
+| GitHub **App** installation | "May PulseGraph read this repo?" | `GITHUB_APP_PRIVATE_KEY` |
+| GitHub **OAuth** login (Supabase) | "Who is this human?" | Supabase session cookie |
+
+Creating the OAuth app below does not touch the App installation.
+
+### One-time setup
+
+1. **GitHub → Settings → Developer settings → OAuth Apps → New OAuth App.**
+   Set the Authorization callback URL to
+   `https://<project-ref>.supabase.co/auth/v1/callback`.
+2. **Supabase → Authentication → Providers → GitHub.** Enable it and paste the
+   Client ID and Client Secret from step 1.
+3. **Supabase → Authentication → URL Configuration.** Site URL
+   `http://localhost:3000`, and add `http://localhost:3000/**` to the redirect
+   allowlist. Supabase rejects any redirect not listed here.
+4. **`web/.env.local`.** Copy `NEXT_PUBLIC_SUPABASE_URL` and the anon
+   (publishable) key from Supabase → Project Settings → API, then set
+   `GITHUB_ALLOWED_LOGINS` to the GitHub usernames allowed in.
+
+### How it is enforced
+
+Three independent layers, because one is not enough:
+
+- `src/proxy.ts` refreshes the Supabase cookie and redirects signed-out page
+  requests to `/login`. This is `proxy.ts`, not `middleware.ts` — Next.js 16
+  renamed the convention, so guides that say `middleware.ts` are out of date.
+- `src/app/page.tsx` re-checks on the server before rendering any incident
+  data. The Next docs warn that a proxy matcher change can silently drop
+  coverage, so the route that renders the data verifies the session itself.
+- Every handler under `src/app/api/` calls `requireDashboardUser()`
+  (`src/server/auth.ts`) as its first statement.
+
+`getAuthState()` uses Supabase's `getUser()` rather than `getSession()`:
+`getUser()` revalidates the token with Supabase, while `getSession()` trusts
+whatever is in the cookie. For an authorization decision the cookie alone is
+not good enough.
+
+**`GITHUB_ALLOWED_LOGINS` fails closed.** An unset or empty value admits
+nobody. A missing env var must never be the thing that opens the console up.
+
+### What this does and does not protect
+
+Login is enforced by the Next.js server. FastAPI is unchanged and still trusts
+`GITHUB_ADMIN_TOKEN`, so **anyone who can reach the backend directly bypasses
+sign-in entirely**. Keep the backend bound to localhost. Before exposing it
+anywhere, the backend needs to verify the Supabase JWT itself.
+
 ## GitHub investigation
 
 The Code Investigation view and the drawer action are read-only by
@@ -117,14 +175,20 @@ carries a `NEXT_PUBLIC_` prefix, and neither appears in the client bundle.
 | --- | --- |
 | `PULSEGRAPH_API_BASE` | Backend origin. Defaults to `http://127.0.0.1:8000`. |
 | `GITHUB_ADMIN_TOKEN` | Bearer token for `/v1/github/*`. Must match the backend's `.env`. |
+| `GITHUB_ALLOWED_LOGINS` | Comma-separated GitHub usernames allowed to sign in. Empty admits nobody. |
+
+`NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are the two
+deliberately public values: they identify the Supabase project but grant
+nothing on their own. Access is decided by the session cookie and the
+server-side allowlist.
 
 The old `NEXT_PUBLIC_API_BASE` is no longer read: the browser has no use for
 the backend's address now that all traffic is same-origin.
 
 ## Not built here
 
-- Dashboard authentication. `GITHUB_ADMIN_TOKEN` is a single shared secret
-  guarding the management routes until real account auth exists, which is why
-  it never leaves the server.
+- Backend-side verification of the dashboard session. FastAPI still trusts
+  `GITHUB_ADMIN_TOKEN`; the Supabase session is checked by the Next.js server
+  in front of it.
 - Editing a patch preview, or any path that writes it anywhere. The backend
   has no endpoint for it and this app adds none.

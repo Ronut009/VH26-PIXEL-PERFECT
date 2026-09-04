@@ -1,4 +1,5 @@
 import { callBackend } from "@/server/pulsegraph";
+import { requireDashboardUser } from "@/server/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -12,5 +13,8 @@ export const dynamic = "force-dynamic";
  * root-cause panel shows its pending state rather than an error.
  */
 export async function GET(): Promise<Response> {
+  const denied = await requireDashboardUser();
+  if (denied) return denied;
+
   return callBackend({ path: "/v1/edges/recent" });
 }

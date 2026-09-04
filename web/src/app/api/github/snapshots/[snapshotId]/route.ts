@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { callBackend, errorResponse } from "@/server/pulsegraph";
+import { requireDashboardUser } from "@/server/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +8,9 @@ export async function GET(
   request: NextRequest,
   context: RouteContext<"/api/github/snapshots/[snapshotId]">,
 ): Promise<Response> {
+  const denied = await requireDashboardUser();
+  if (denied) return denied;
+
   const { snapshotId } = await context.params;
   if (!snapshotId.trim()) {
     return errorResponse(422, "invalid_request", "A snapshot ID is required.");

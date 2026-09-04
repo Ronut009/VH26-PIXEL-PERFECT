@@ -1,4 +1,5 @@
 import { callBackend, errorResponse, positiveInteger, readJsonObject } from "@/server/pulsegraph";
+import { requireDashboardUser } from "@/server/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +8,9 @@ export async function PUT(
   request: Request,
   context: RouteContext<"/api/github/service-mappings/[service]">,
 ): Promise<Response> {
+  const denied = await requireDashboardUser();
+  if (denied) return denied;
+
   const { service } = await context.params;
   if (!service.trim()) {
     return errorResponse(422, "invalid_request", "A service name is required.");

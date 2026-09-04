@@ -114,7 +114,10 @@ export type ApiErrorCode =
   | "admin_token_missing"
   | "invalid_request"
   | "upstream_error"
-  | "invalid_upstream_response";
+  | "invalid_upstream_response"
+  | "unauthorized"
+  | "forbidden"
+  | "auth_unconfigured";
 
 export interface ApiErrorBody {
   error: {
@@ -276,4 +279,18 @@ export interface GithubPatchPreview {
   human_review_required: boolean;
   automatically_applied: boolean;
   patch: PatchReview;
+}
+
+/**
+ * The signed-in dashboard user. Lives here rather than in `@/server/auth` so
+ * client components can reference the shape without importing a server-only
+ * module.
+ */
+export interface DashboardUser {
+  id: string;
+  /** GitHub username, the identity the allowlist is written against. */
+  login: string;
+  name: string | null;
+  avatarUrl: string | null;
+  email: string | null;
 }

@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchIncidentsSince, streamUrl } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { fetchIncidentsSince, streamUrl, PulseGraphApiError } from "@/lib/api";
 import { normalizeEdge, normalizeIncident } from "@/lib/types";
 import type { Incident, IncidentEdge } from "@/lib/types";
 
@@ -35,6 +36,7 @@ type SnapshotPayload = {
 export function usePulseGraphStream() {
   const [incidents, setIncidents] = useState<Map<string, Incident>>(new Map());
   const [edges, setEdges] = useState<Map<string, IncidentEdge>>(new Map());
+  const router = useRouter();
   const [state, setState] = useState<StreamState>("connecting");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
@@ -119,13 +121,23 @@ export function usePulseGraphStream() {
       setState("polling");
       setLastUpdated(new Date());
       setLoading(false);
-    } catch {
-      if (mountedRef.current) {
-        setState("offline");
-        setLoading(false);
+    } catch (cause) {
+      if (!mountedRef.current) return;
+
+      // A session that expired mid-visit is not the backend being down. Send
+      // the user back to sign in rather than showing an "offline" console.
+      if (
+        cause instanceof PulseGraphApiError &&
+        (cause.code === "unauthorized" || cause.code === "forbidden")
+      ) {
+        router.push("/login");
+        return;
       }
+
+      setState("offline");
+      setLoading(false);
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     mountedRef.current = true;

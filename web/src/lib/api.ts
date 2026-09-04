@@ -83,9 +83,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (!res.ok) {
     const envelope = asErrorBody(parsed);
+    const code = envelope?.error.code ?? "upstream_error";
+
     throw new PulseGraphApiError(
       envelope?.error.message ?? `Request to ${path} failed with HTTP ${res.status}.`,
-      envelope?.error.code ?? "upstream_error",
+      code,
       res.status,
       envelope?.error.upstream_status,
     );

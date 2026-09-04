@@ -1,15 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { DashboardUser } from "@/lib/types";
 
 export function TopHeader({
   title,
   connected,
   lastEvent,
+  user,
 }: {
   title: string;
   connected: boolean;
   lastEvent: Date | null;
+  user: DashboardUser;
 }) {
   const [now, setNow] = useState<string>("");
   const [ago, setAgo] = useState<string | null>(null);
@@ -73,12 +76,38 @@ export function TopHeader({
           </svg>
         </button>
 
-        <span
-          className="grid size-7 place-items-center rounded-full bg-brand text-[11px] font-medium text-white"
-          aria-label="Signed in"
-        >
-          PG
+        <span className="flex items-center gap-2">
+          {user.avatarUrl ? (
+            // Plain <img>: the avatar comes from avatars.githubusercontent.com,
+            // which would otherwise need a next.config images allowlist for a
+            // 28px image that is already cached by the browser.
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={user.avatarUrl}
+              alt=""
+              width={28}
+              height={28}
+              className="size-7 rounded-full border border-edge"
+            />
+          ) : (
+            <span
+              className="grid size-7 place-items-center rounded-full bg-brand text-[11px] font-medium text-white"
+              aria-hidden
+            >
+              {(user.login || "?").slice(0, 2).toUpperCase()}
+            </span>
+          )}
+          <span className="hidden text-text-2 lg:inline">{user.login}</span>
         </span>
+
+        <form action="/auth/signout" method="post">
+          <button
+            type="submit"
+            className="rounded-md border border-edge bg-panel px-2.5 py-1 text-[12px] font-medium text-text-2 transition-colors hover:bg-panel-2 hover:text-text"
+          >
+            Sign out
+          </button>
+        </form>
       </div>
     </header>
   );

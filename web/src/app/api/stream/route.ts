@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { streamBackend } from "@/server/pulsegraph";
+import { requireDashboardUser } from "@/server/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,9 @@ export const dynamic = "force-dynamic";
  * where it left off.
  */
 export async function GET(request: NextRequest): Promise<Response> {
+  const denied = await requireDashboardUser();
+  if (denied) return denied;
+
   const after = Number(request.nextUrl.searchParams.get("after"));
   return streamBackend({
     path: "/v1/stream",

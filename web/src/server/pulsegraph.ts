@@ -16,6 +16,8 @@
  *     and never reaches a client component.
  */
 
+import type { ApiErrorCode } from "@/lib/types";
+
 if (typeof window !== "undefined") {
   // A stray import from a client component would otherwise fail silently
   // (with `process.env.GITHUB_ADMIN_TOKEN` simply undefined in the bundle).
@@ -27,13 +29,13 @@ if (typeof window !== "undefined") {
 const DEFAULT_API_BASE = "http://127.0.0.1:8000";
 const REQUEST_TIMEOUT_MS = 15_000;
 
-/** Machine-readable failure codes the UI switches on. */
-export type ApiErrorCode =
-  | "backend_unreachable"
-  | "admin_token_missing"
-  | "invalid_request"
-  | "upstream_error"
-  | "invalid_upstream_response";
+/**
+ * Machine-readable failure codes the UI switches on.
+ *
+ * Declared once in `@/lib/types` (which the browser may import) and re-exported
+ * here, so the server and client unions cannot drift apart.
+ */
+export type { ApiErrorCode };
 
 export interface ApiErrorPayload {
   error: {
