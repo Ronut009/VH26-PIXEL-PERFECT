@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+/*
+  Design tokens for the incident console.
+  One spacing unit = 4px, used consistently as 1/2/3/4/6/8/12 (Tailwind's
+  default scale) — no ad hoc px values in components.
+  Color is functional: severity/status drive it, nothing is colored for
+  decoration. Console is high-contrast dark by default (this is an
+  always-on-a-second-monitor tool, not a marketing page).
+*/
+:root {
+  --bg: #0b0d10;
+  --bg-raised: #15181d;
+  --bg-inset: #0d0f12;
+  --hairline: rgba(255, 255, 255, 0.1);
+  --hairline-strong: rgba(255, 255, 255, 0.2);
+  --text: #edf1f4;
+  --text-dim: #98a3ad;
+  --text-faint: #5c6670;
+
+  --live: #35d68a;
+  --warn: #e8b23d;
+  --down: #ef5a5a;
+
+  --sev-critical: #ef5a5a;
+  --sev-high: #e8823d;
+  --sev-medium: #e8c53d;
+  --sev-low: #4f8ef7;
+
+  --route-suppressed: #5c6670;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-raised: var(--bg-raised);
+  --color-bg-inset: var(--bg-inset);
+  --color-hairline: var(--hairline);
+  --color-text: var(--text);
+  --color-text-dim: var(--text-dim);
+  --color-text-faint: var(--text-faint);
+  --font-ui: var(--font-ui);
+  --font-data: var(--font-data);
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui), system-ui, sans-serif;
+  font-size: 14px;
+  position: relative;
+}
+
+/*
+  Grain, not gradient: a static film-grain layer instead of a flat color
+  fade to give the black console some tooth. Fixed + pointer-events:none
+  so it never intercepts clicks or scrolls with the page.
+*/
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+::selection {
+  background: var(--sev-low);
+  color: #08090b;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--hairline-strong) transparent;
+}

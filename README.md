@@ -116,7 +116,12 @@ tamper detection (`test_hashchain.py`), and the DbWriter happy path + critical-b
 
 - IncidentEngine (exact dedupe, EWMA burst detection, lifecycle transitions, timer wheel) — Vansh
 - CoOccurrenceGraph (decayed edges, root-cause ranking) + SSE publisher — Anish
-- Next.js dashboard — Ronit
 
 `GET /v1/incidents/recent` is exposed for Anish's SSE publisher to wrap; the SSE layer
 itself is his.
+
+## Dashboard
+
+The Next.js console lives in [web/](web/) (see [web/README.md](web/README.md)). It polls
+`GET /v1/incidents/recent` today and is isolated to switch to `GET /v1/stream` once the SSE
+publisher ships; its root-cause graph panel is built but waits on an edges endpoint.
