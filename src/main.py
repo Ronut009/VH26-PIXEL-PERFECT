@@ -7,6 +7,8 @@ from src.config import settings
 from src.contracts import NormalizedEvent
 from src.db.connection import Database, get_reader_connection
 from src.db.writer import DbWriter
+from src.engine.timer_wheel import TimerWheel
+from src.engine.timer_worker import TimerWorker
 from src.ingest.prometheus import normalize_prometheus
 from src.outbox.worker import OutboxWorker
 from src.stream.sse_broker import create_sse_router
@@ -21,19 +23,24 @@ async def lifespan(app: FastAPI):
     db = Database(settings.DATABASE_PATH)
     await db.connect()
 
-    writer = DbWriter()
+    timer_wheel = TimerWheel()
+    writer = DbWriter(timer_wheel=timer_wheel)
+    timer_worker = TimerWorker(db, timer_wheel)
+    timer_worker.start()
     worker = OutboxWorker(db)
     worker.start()
 
     app.state.db = db
     app.state.writer = writer
     app.state.worker = worker
+    app.state.timer_worker = timer_worker
 
     logger.info("app_started", database_path=settings.DATABASE_PATH)
 
     try:
         yield
     finally:
+        await timer_worker.stop()
         await worker.stop()
         await db.close()
         logger.info("app_stopped")

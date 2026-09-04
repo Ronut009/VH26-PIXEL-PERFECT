@@ -7,12 +7,16 @@ import logging
 
 from src.contracts import NormalizedEvent
 from src.engine.process_event import persist_and_observe, process_event as process_engine_event
+from src.engine.timer_wheel import TimerWheel
 
 logger = logging.getLogger(__name__)
 
 
 class DbWriter:
     """Own one BEGIN IMMEDIATE transaction per normalized alert event."""
+
+    def __init__(self, timer_wheel: TimerWheel | None = None) -> None:
+        self._timer_wheel = timer_wheel
 
     async def process_event(
         self, db_conn: aiosqlite.Connection, event: NormalizedEvent
@@ -32,6 +36,9 @@ class DbWriter:
         except Exception:
             await db_conn.rollback()
             raise
+
+        if self._timer_wheel is not None and decision.quiet_at_ms is not None:
+            self._timer_wheel.schedule(decision.incident_id, decision.quiet_at_ms)
 
         logger.info(
             "event_processed event_id=%s incident_id=%s seq=%s bypassed=%s duplicate=%s state=%s",
