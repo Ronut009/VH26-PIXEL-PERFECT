@@ -66,6 +66,22 @@ class Settings(BaseSettings):
     # it distorts every elapsed-time judgement made about that source's alerts.
     # Warnings are throttled per source so a drifted clock reports itself
     # without burying the log.
+    # Dead man's switch. The heartbeat is sent to an EXTERNAL watchdog
+    # (PagerDuty heartbeat, healthchecks.io) that pages when pings stop
+    # arriving. Unset means nothing anywhere notices if this process dies.
+    # It is gated on delivery actually working, not on the process being
+    # alive, so a stalled outbox goes silent instead of reporting all-clear.
+    HEARTBEAT_URL: str = ""
+    HEARTBEAT_INTERVAL_SECONDS: float = 60.0
+    HEARTBEAT_TIMEOUT_SECONDS: float = 10.0
+
+    # Self-check thresholds. Undelivered-age is generous because an open
+    # breaker legitimately parks rows while a provider is down; this is meant
+    # to catch "nothing is draining at all".
+    SELFCHECK_STUCK_OUTBOX_SECONDS: float = 900.0
+    SELFCHECK_DEAD_LETTER_LIMIT: int = 10
+    SELFCHECK_QUIET_INGEST_SECONDS: float = 3600.0
+
     CLOCK_SKEW_WARN_MS: int = 120_000
     CLOCK_SKEW_WARN_INTERVAL_SECONDS: float = 300.0
 

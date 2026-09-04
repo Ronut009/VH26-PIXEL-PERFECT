@@ -4,8 +4,8 @@ A pass over PulseGraph looking for what an experienced reviewer would attack
 next, now that the delivery and reconciliation planes are closed. Each entry
 states the gap, the concrete failure it produces, and the design that fixes it.
 
-Ordered by what gets asked first, not by effort. Gaps 1-4 are now fixed;
-the rest stand.
+Ordered by what gets asked first, not by effort. Gaps 1-4 and 6 are now
+fixed; the rest stand.
 
 ---
 
@@ -264,7 +264,7 @@ unique key. A retry then becomes a no-op insert rather than a new event. The
 inbound plane already does exactly this with `inbound_events`; ingest should
 use the same pattern.
 
-## 6. Nothing watches the watcher
+## 6. Nothing watches the watcher — FIXED
 
 If PulseGraph crashes, nobody finds out. There are no alerts about the alerting
 system, and its silence is indistinguishable from a quiet night — which is the
@@ -275,19 +275,60 @@ It is worse than a normal outage, because failures correlate: the thing most
 likely to take down PulseGraph is the same infrastructure event that should be
 generating the alerts it is failing to deliver.
 
-**Design.**
+**Fixed** in [src/selfcheck/](../src/selfcheck/), around one distinction:
+**being alive is not being healthy.**
 
-- **A dead man's switch.** Emit a heartbeat on a fixed interval to an external
-  service (PagerDuty heartbeat, healthchecks.io); *absence* of the heartbeat
-  pages. The check must live somewhere PulseGraph cannot influence, which is
-  the whole point.
-- **Deploy outside the blast radius.** An alerting system inside the cluster it
-  monitors will be down when it is needed. It belongs in a different failure
-  domain — the same argument already made for PagerDuty as a fallback channel.
-- **Expose internal state as first-class signals**: outbox depth, dead-letter
-  count, breaker states, oldest pending row age, sweep lag. `channel_health`
-  and `channel_outages` already hold most of it; it needs an endpoint and a
-  dashboard tile.
+A liveness probe proves the process is running. It proves nothing about whether
+alerts reach anyone — and PulseGraph answers `200 OK` on every request while
+its outbox stalls, its breakers sit open, or its drain loop is dead. That gap
+is now demonstrable in two lines:
+
+```
+/v1/health      → {"status": "healthy"}
+/v1/health/self → {"verdict": "unhealthy",
+                   "reasons": ["background worker(s) not running: outbox"]}
+```
+
+Three pieces:
+
+- **`/v1/health/self`** reports on *delivery*, not uptime. Every signal it
+  returns was already being recorded and none of it was reachable:
+  `outbox` knows what is undelivered, `channel_health` which providers are
+  down, `channel_outages` what is still open, `source_clock_skew` which
+  exporter drifted, `graph_scope_stats` how far ranking has fallen behind.
+  Gathering is read-only and never raises — a self-check that fails when the
+  system is unwell reports nothing exactly when it matters, so an unreadable
+  signal becomes its own finding.
+- **A dead man's switch** (`HeartbeatEmitter`) pings an external watchdog, and
+  is **gated on the verdict rather than on being alive**. A liveness-driven
+  heartbeat would keep insisting all is well while nothing is delivered — an
+  *active* all-clear, which is worse than no heartbeat at all. When delivery
+  is broken it goes silent and the watchdog pages. It is a direct HTTP call,
+  never an outbox row: routing the heartbeat through the machinery it checks
+  would mean a stalled outbox also stalls the heartbeat, which happens to page
+  but only by luck, and a beat queued behind a backlog would report a system
+  that died an hour ago as fine.
+- **A severity split that respects the delivery plane.** An open breaker is
+  `DEGRADED`, not `UNHEALTHY`, and still heartbeats. Failing over is the system
+  working, and paging for it would punish correct behaviour — during the
+  provider incident a responder is already handling. `UNHEALTHY` is reserved
+  for "alerts are not getting out".
+
+**The honest non-answer.** Silence from every source is reported as an
+*observation* and never pages. A quiet night and a severed intake path look
+identical from inside, and guessing wrong is costly both ways: page on every
+quiet night and the heartbeat becomes noise; treat a severed intake as calm and
+the blind spot is total. Only something outside can tell them apart — which is
+the argument for the external watchdog restated from the other side.
+
+With `HEARTBEAT_URL` unset the emitter logs a warning saying plainly that
+nothing anywhere will notice if this process dies, rather than quietly doing
+nothing.
+
+**Still outstanding:** deploying outside the blast radius is a deployment
+decision, not a code one — an alerting system inside the cluster it monitors
+will be down when it is needed. And the dashboard tile for `/v1/health/self`
+is not built; the endpoint is there for it.
 
 ## 7. No backpressure — load is absorbed by getting slower
 

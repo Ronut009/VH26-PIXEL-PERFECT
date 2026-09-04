@@ -78,6 +78,16 @@ class OutboxWorker:
         self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:8]}"
         self._task: asyncio.Task | None = None
 
+    @property
+    def running(self) -> bool:
+        """Whether the drain loop is still alive.
+
+        A dead drain loop is invisible from outside: HTTP keeps answering and
+        ingest keeps accepting while nothing is ever delivered.
+        """
+
+        return self._task is not None and not self._task.done()
+
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
 

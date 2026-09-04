@@ -114,6 +114,10 @@ a critical payment failure that immediately bypasses aggregation.
 | `DATABASE_PATH` | Path to the SQLite file (default `data/alerts.db`) |
 | `INGEST_AUTH_ENABLED` | Require a credential on `/v1/ingest/*` (default `true`; fails closed when no tokens are set) |
 | `INGEST_TOKENS` | `name:token[:scope]`, comma-separated. Scope is a prefix over `environment/cluster`, so a staging token cannot write production |
+| `HEARTBEAT_URL` | External watchdog to ping (PagerDuty heartbeat, healthchecks.io). **Unset means nothing notices if this process dies.** The ping stops when delivery is broken, so absence pages |
+| `HEARTBEAT_INTERVAL_SECONDS` | How often to report in (default `60`) |
+| `SELFCHECK_STUCK_OUTBOX_SECONDS` | Undelivered age at which delivery counts as stalled (default `900`) |
+| `SELFCHECK_DEAD_LETTER_LIMIT` | Dead letters tolerated before reporting degraded (default `10`) |
 | `CLOCK_SKEW_WARN_MS` | Source clock offset that earns a warning (default `120000`); drift distorts every elapsed-time judgement about that source |
 | `CLOCK_SKEW_WARN_INTERVAL_SECONDS` | Throttle between skew warnings per source (default `300`) |
 | `ROOT_CAUSE_SWEEP_INTERVAL_SECONDS` | How often root cause is re-ranked off the write path; also the debounce (default `2`) |
@@ -170,7 +174,8 @@ pointing at the backend.
 | `GET` | `/v1/stream[?after=<streamId>]` | Server-Sent Events — snapshot + live deltas (`incident.upsert`, `graph.edge.upsert`, `card.update`, `metrics.update`) |
 | `POST` | `/v1/slack/interactions` | Signed Slack interaction callbacks — Acknowledge / Resolve buttons |
 | `POST` | `/v1/pagerduty/webhooks` | Signed PagerDuty v3 webhooks — acknowledgement and resolution sync |
-| `GET` | `/v1/health` | Liveness check — executes `SELECT 1` against the writer connection |
+| `GET` | `/v1/health` | Liveness only — executes `SELECT 1` against the writer connection |
+| `GET` | `/v1/health/self` | Whether alerts are actually getting out: worker liveness, outbox depth and age, breaker states, clock skew, and whether the dead man's switch is armed |
 
 ## Delivery resilience
 

@@ -29,6 +29,9 @@ from src.github_integration.ollama_provider import (
 )
 from src.github_integration.router import create_github_router
 from src.graph.root_cause_worker import RootCauseWorker
+from src.selfcheck.health import SelfCheckThresholds, evaluate
+from src.selfcheck.heartbeat import HeartbeatEmitter
+from src.selfcheck.signals import gather
 from src.inbound.router import create_inbound_router
 from src.engine.process_event import scope_key_for
 from src.ingest.auth import (
@@ -139,6 +142,12 @@ async def lifespan(app: FastAPI):
     # debounced per scope rather than once per alert.
     root_cause_worker = RootCauseWorker(db)
     root_cause_worker.start()
+    # The dead man's switch. Started last so it observes a fully-built app, and
+    # deliberately given app.state so it can see whether the other workers are
+    # alive - a process answering HTTP while its drain loop is dead is exactly
+    # the failure it exists to catch.
+    heartbeat = HeartbeatEmitter(db, app.state)
+    heartbeat.start()
 
     app.state.ingest_credentials = parse_tokens(settings.INGEST_TOKENS)
     if settings.INGEST_AUTH_ENABLED and not app.state.ingest_credentials:
@@ -152,6 +161,7 @@ async def lifespan(app: FastAPI):
 
     app.state.silence_sweeper = silence_sweeper
     app.state.root_cause_worker = root_cause_worker
+    app.state.heartbeat = heartbeat
     app.state.db = db
     app.state.writer = writer
     app.state.worker = worker
@@ -169,6 +179,7 @@ async def lifespan(app: FastAPI):
         await timer_worker.stop()
         await silence_sweeper.stop()
         await root_cause_worker.stop()
+        await heartbeat.stop()
         await worker.stop()
         if github_client is not None:
             await github_client.aclose()
@@ -338,6 +349,8 @@ async def incidents_recent(since: str | None = None):
 
 @app.get("/v1/health")
 async def health(request: Request):
+    """Liveness only. See /v1/health/self for whether alerts are getting out."""
+
     db: Database = request.app.state.db
     try:
         async with db.write_lock:
@@ -345,6 +358,60 @@ async def health(request: Request):
         return {"status": "healthy"}
     except Exception as exc:
         return {"status": "unhealthy", "error": str(exc)}
+
+
+@app.get("/v1/health/self")
+async def health_self(request: Request):
+    """What the alerting system knows about itself.
+
+    Every signal here was already being recorded and none of it was reachable,
+    so an operator's only view of PulseGraph was whether its HTTP port
+    answered - which stays true while the outbox stalls and nothing is
+    delivered. This reports on *delivery*, which is the job.
+    """
+
+    db: Database = request.app.state.db
+    signals = await gather(db, request.app.state)
+    report = evaluate(
+        signals,
+        SelfCheckThresholds(
+            stuck_outbox_seconds=settings.SELFCHECK_STUCK_OUTBOX_SECONDS,
+            dead_letter_limit=settings.SELFCHECK_DEAD_LETTER_LIMIT,
+            quiet_ingest_seconds=settings.SELFCHECK_QUIET_INGEST_SECONDS,
+            clock_skew_ms=settings.CLOCK_SKEW_WARN_MS,
+        ),
+    )
+
+    emitter: HeartbeatEmitter | None = getattr(request.app.state, "heartbeat", None)
+    return {
+        "verdict": report.verdict.value,
+        "reasons": list(report.reasons),
+        "observations": list(report.observations),
+        "signals": {
+            "database_reachable": signals.database_reachable,
+            "workers": signals.workers,
+            "outbox_pending": signals.outbox_pending,
+            "outbox_dead": signals.outbox_dead,
+            "oldest_pending_age_seconds": signals.oldest_pending_age_seconds,
+            "open_channels": list(signals.open_channels),
+            "ongoing_outages": signals.ongoing_outages,
+            "seconds_since_last_ingest": signals.seconds_since_last_ingest,
+            "worst_clock_skew_ms": signals.worst_clock_skew_ms,
+            "unranked_scopes": signals.unranked_scopes,
+        },
+        # Whether anything outside would actually notice this process dying.
+        "dead_mans_switch": {
+            "configured": bool(emitter and emitter.enabled),
+            "running": bool(emitter and emitter.running),
+            "last_verdict": (
+                emitter.last_verdict.value
+                if emitter and emitter.last_verdict
+                else None
+            ),
+            "last_send_ok": emitter.last_sent_ok if emitter else None,
+            "suppressed_beats": emitter.suppressed_count if emitter else 0,
+        },
+    }
 
 
 if __name__ == "__main__":
