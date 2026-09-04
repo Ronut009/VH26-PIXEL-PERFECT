@@ -15,6 +15,8 @@ from src.db.connection import Database, get_reader_connection
 from src.db.writer import DbWriter
 from src.engine.timer_wheel import TimerWheel
 from src.engine.timer_worker import TimerWorker
+from src.ingest.normalize_datadog import normalize_datadog
+from src.ingest.normalize_grafana import normalize_grafana
 from src.ingest.prometheus import normalize_prometheus
 from src.outbox.worker import OutboxWorker
 from src.stream.sse_broker import create_sse_router
@@ -80,6 +82,37 @@ async def ingest_prometheus(request: Request):
         results.append(result)
 
     return {"status": "ok", "ingested": len(results), "results": results}
+
+
+async def _ingest_normalized_events(request: Request, normalizer, source: str):
+    """Parse one provider's payload and send its normalized events to the writer."""
+
+    try:
+        body = await request.json()
+        events: list[NormalizedEvent] = normalizer(body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"invalid {source} payload: {exc}")
+
+    db: Database = request.app.state.db
+    writer: DbWriter = request.app.state.writer
+
+    results = []
+    for event in events:
+        async with db.write_lock:
+            result = await writer.process_event(db.writer_conn, event)
+        results.append(result)
+
+    return {"status": "ok", "ingested": len(results), "results": results}
+
+
+@app.post("/v1/ingest/datadog")
+async def ingest_datadog(request: Request):
+    return await _ingest_normalized_events(request, normalize_datadog, "datadog")
+
+
+@app.post("/v1/ingest/grafana")
+async def ingest_grafana(request: Request):
+    return await _ingest_normalized_events(request, normalize_grafana, "grafana")
 
 
 @app.get("/v1/incidents/recent")
