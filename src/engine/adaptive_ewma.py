@@ -4,6 +4,10 @@ import math
 
 
 DEFAULT_INITIAL_WINDOW_MS = 5_000
+# A single predicted silence window is never allowed past this. Without a
+# ceiling, one pathologically slow-flapping alert can predict a window of
+# hours and hold its incident undelivered for that long.
+DEFAULT_MAX_WINDOW_MS = 300_000
 
 
 def _validate_gap(gap: float) -> float:
@@ -14,7 +18,10 @@ def _validate_gap(gap: float) -> float:
 
 
 def calculate_quiet_deadline(
-    gap_history: list[float], last_gap: float, current_time: int
+    gap_history: list[float],
+    last_gap: float,
+    current_time: int,
+    max_window_ms: float | None = None,
 ) -> dict[str, float | int]:
     """Predict an adaptive quiet deadline from observed inter-arrival gaps.
 
@@ -22,14 +29,22 @@ def calculate_quiet_deadline(
     gain is derived from the available observation count: ``2 / (n + 1)``.
     The silence window is the predicted mean gap plus its observed uncertainty.
     No wall-clock batching interval or side effect is involved.
+
+    ``max_window_ms`` bounds one prediction so a noisy signal cannot defer its
+    own delivery indefinitely. It caps the window, not the incident: the caller
+    is responsible for the absolute ceiling measured from first alert.
     """
 
     gaps = [_validate_gap(gap) for gap in gap_history]
     validated_last_gap = _validate_gap(last_gap)
 
+    ceiling = DEFAULT_MAX_WINDOW_MS if max_window_ms is None else float(max_window_ms)
+    if ceiling <= 0:
+        raise ValueError("max_window_ms must be greater than zero")
+
     if not gaps:
         return {
-            "quiet_at_ms": int(current_time + DEFAULT_INITIAL_WINDOW_MS),
+            "quiet_at_ms": int(current_time + min(DEFAULT_INITIAL_WINDOW_MS, ceiling)),
             "mean_gap": validated_last_gap,
             "variance": 0.0,
         }
@@ -48,7 +63,7 @@ def calculate_quiet_deadline(
             variance + (alpha * (gap - previous_mean) ** 2)
         )
 
-    silence_window = mean_gap + math.sqrt(variance)
+    silence_window = min(mean_gap + math.sqrt(variance), ceiling)
     quiet_at_ms = int(current_time + max(1, math.ceil(silence_window)))
 
     return {

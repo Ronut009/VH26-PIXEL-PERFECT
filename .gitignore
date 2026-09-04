@@ -8,3 +8,6 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+
+# Machine-local Claude Code permission grants (absolute paths, per-developer)
+.claude/

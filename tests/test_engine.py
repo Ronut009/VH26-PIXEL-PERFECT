@@ -162,10 +162,22 @@ def test_machine_only_reopens_resolved_incidents() -> None:
     assert transition_state("OPEN", "REOPEN") is None
 
 
+def test_machine_resolves_from_every_active_state() -> None:
+    """A fix can land while an incident is still firing.
+
+    Incidents are created directly in ACKNOWLEDGED, so when RESOLVE was
+    reachable only from QUIESCENT, a `resolved` webhook - or an operator
+    resolving in PagerDuty - was dropped and the incident never closed.
+    """
+
+    assert transition_state("OPEN", "RESOLVE") == "RESOLVED"
+    assert transition_state("ACKNOWLEDGED", "RESOLVE") == "RESOLVED"
+    assert transition_state("QUIESCENT", "RESOLVE") == "RESOLVED"
+
+
 @pytest.mark.parametrize(
     ("current_state", "trigger"),
     [
-        ("OPEN", "RESOLVE"),
         ("ACKNOWLEDGED", "REOPEN"),
         ("QUIESCENT", "ACKNOWLEDGE"),
         ("RESOLVED", "ACKNOWLEDGE"),

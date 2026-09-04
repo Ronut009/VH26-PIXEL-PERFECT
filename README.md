@@ -116,7 +116,18 @@ a critical payment failure that immediately bypasses aggregation.
 | `LOG_LEVEL` | structlog level (default `INFO`) |
 | `ENVIRONMENT` | `dev` / etc., informational |
 | `OUTBOX_POLL_INTERVAL_MS` | How often the OutboxWorker polls for pending deliveries (default `500`) |
-| `OUTBOX_MAX_ATTEMPTS` | Attempts before an outbox row is marked `dead` (default `5`) |
+| `OUTBOX_MAX_ATTEMPTS` | Attempts a row may burn on its *own* faults before `dead` (default `5`). A channel outage no longer consumes this budget |
+| `OUTBOX_BREAKER_FAILURE_THRESHOLD` | Consecutive channel-level failures before a channel is declared down (default `3`) |
+| `OUTBOX_PROBE_BASE_SECONDS` / `OUTBOX_PROBE_MAX_SECONDS` | Backoff bounds for the liveness probe that detects recovery (default `5` / `120`) |
+| `OUTBOX_HALF_OPEN_ALLOWANCE` | Real deliveries trialled before the breaker fully closes (default `3`) |
+| `QUIET_WINDOW_MAX_MS` | Ceiling on any single predicted silence window (default `300000`) |
+| `INCIDENT_MAX_BATCH_SPAN_MS` | Ceiling on how long one incident may defer delivery, from its first alert (default `600000`) |
+| `SLACK_SIGNING_SECRET` | Verifies Slack interaction callbacks; unset means the route rejects everything |
+| `PAGERDUTY_WEBHOOK_SECRET` | Verifies PagerDuty v3 webhooks; unset means the route rejects everything |
+| `SILENCE_RESOLVE_ENABLED` | Close incidents whose alerts stopped arriving (default `true`) |
+| `SILENCE_RESOLVE_MULTIPLIER` / `_CRITICAL_MULTIPLIER` | Silence threshold as a multiple of the incident's own EWMA gap (default `6` / `20`) |
+| `SILENCE_RESOLVE_MIN_MS` / `_MAX_MS` | Floor and ceiling on that threshold (default 15 min / 6 h) |
+| `SILENCE_SWEEP_INTERVAL_SECONDS` | How often the sweeper looks for gone-quiet incidents (default `30`) |
 | `GITHUB_APP_CLIENT_ID` | GitHub App Client ID for the read-only GitHub integration |
 | `GITHUB_APP_PRIVATE_KEY` | GitHub App PEM private key (deployment secret) |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub App webhook verification |
@@ -126,6 +137,11 @@ a critical payment failure that immediately bypasses aggregation.
 | `OLLAMA_ENABLED` | Enables the optional local-only open-model provider (default `false`) |
 | `OLLAMA_MODEL` | Local model name, e.g. `qwen2.5-coder:7b` |
 | `OLLAMA_BASE_URL` | Loopback Ollama endpoint only (default `http://127.0.0.1:11434`) |
+| `ANTHROPIC_DIAGNOSIS_ENABLED` | Enables the hosted diagnosis tier; sends bounded source off-box, so it is opt-in and loses to Ollama when both are set |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | Credentials and model for hosted diagnosis (default `claude-opus-5`) |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` | SMTP relay for the email failover channel (Gmail needs an App Password) |
+| `EMAIL_FROM` / `EMAIL_TO` | Sender and comma-separated recipients for fallback email |
+| `OUTBOX_LEASE_SECONDS` / `OUTBOX_BATCH_SIZE` | Delivery claim lease and batch size; the lease is what makes a second worker safe |
 
 Real values live in `.env` (gitignored) — see `.env.example` for the template.
 The dashboard has its own `web/.env.local`, with just `NEXT_PUBLIC_API_BASE`
@@ -144,7 +160,30 @@ pointing at the backend.
 | `POST` | `/v1/github/analyses/{id}/patch-preview` | Generate a local-only, human-reviewable diff; never writes GitHub (admin token required) |
 | `GET` | `/v1/incidents/recent?since=<iso8601>` | Poll-friendly incident list, consumed by the dashboard |
 | `GET` | `/v1/stream[?after=<streamId>]` | Server-Sent Events — snapshot + live deltas (`incident.upsert`, `graph.edge.upsert`, `card.update`, `metrics.update`) |
+| `POST` | `/v1/slack/interactions` | Signed Slack interaction callbacks — Acknowledge / Resolve buttons |
+| `POST` | `/v1/pagerduty/webhooks` | Signed PagerDuty v3 webhooks — acknowledgement and resolution sync |
 | `GET` | `/v1/health` | Liveness check — executes `SELECT 1` against the writer connection |
+
+## Delivery resilience
+
+A Slack outage is a delivery problem here, not a data-loss one. The outbox is
+written in the same transaction as the incident, a per-channel circuit breaker
+decides whether a channel is up, a side-effect-free probe decides when it is
+back, and the backlog is coalesced and re-rendered from current state before it
+drains. Critical traffic fails over to PagerDuty while the primary is down.
+
+```bash
+python scripts/outage_drill.py     # the whole lifecycle, offline, narrated
+```
+
+State also flows back *in*: signed Slack and PagerDuty callbacks apply
+acknowledgements and resolutions to the incident, and a sweeper closes
+incidents whose alerts simply stopped, since most fixes are never reported by
+anyone. Every such change goes through the same hash-chained ledger and outbox
+as an alert, so acknowledging in PagerDuty updates the Slack card.
+
+See [Delivery resilience, grouping, and scale](docs/resilience-and-scale.md)
+for the mechanisms and their current limits.
 
 ## Verification
 

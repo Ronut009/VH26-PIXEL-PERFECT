@@ -12,6 +12,7 @@ import aiosqlite
 
 from src.contracts import EngineDecision
 from src.db.hashchain import compute_row_hash, next_seq_and_prev_hash
+from src.outbox.routing import priority_for
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,9 @@ class IncidentRecord:
     last_seen_ms: int
     gap_history: tuple[float, ...]
     alert_count: int
+    # When this incident first fired, so the engine can bound how long its
+    # adaptive batch window is allowed to keep deferring delivery.
+    first_alert_ms: int = 0
 
 
 def _iso(value: datetime) -> str:
@@ -56,6 +60,7 @@ async def lookup_incident(
             i.incident_id,
             i.status,
             i.last_alert_at,
+            i.first_alert_at,
             i.gap_history_json,
             i.alert_count,
             r.service,
@@ -105,6 +110,7 @@ async def lookup_incident(
         last_seen_ms=_epoch_ms(row["last_alert_at"]),
         gap_history=gap_history,
         alert_count=int(row["alert_count"]),
+        first_alert_ms=_epoch_ms(row["first_alert_at"]),
     )
 
 
@@ -217,11 +223,15 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
                 intent.payload_json,
             ),
         )
+        # Priority is stamped at enqueue time from the incident's severity so a
+        # backlog drained after an outage delivers criticals first, rather than
+        # in the insertion order of a queue nobody was watching.
         await tx.execute(
             """
             INSERT INTO outbox (
-                incident_id, channel, action, payload_json, status, next_attempt_at
-            ) VALUES (?, ?, ?, ?, 'pending', ?)
+                incident_id, channel, action, payload_json, status,
+                next_attempt_at, priority, origin_channel
+            ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
             """,
             (
                 str(decision.incident_id),
@@ -229,6 +239,8 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
                 "create" if intent.action == "trigger" else intent.action,
                 intent.payload_json,
                 now,
+                priority_for(decision.severity_final),
+                intent.channel,
             ),
         )
 

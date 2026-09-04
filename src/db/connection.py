@@ -20,10 +20,64 @@ async def _apply_pragmas(conn: aiosqlite.Connection) -> None:
         await conn.execute(pragma)
 
 
+# Additive columns for databases created before delivery-resilience landed.
+# CREATE TABLE IF NOT EXISTS cannot widen an existing table, so these are
+# applied separately and are safe to run on every startup.
+_OUTBOX_COLUMN_MIGRATIONS = (
+    # Lower number drains first, so a critical page never waits behind a
+    # backlog of low-severity noise when a channel comes back up.
+    ("priority", "INTEGER NOT NULL DEFAULT 2"),
+    # Set when a newer intent for the same incident+channel replaced this row
+    # during recovery coalescing, instead of both being delivered.
+    ("locked_by", "TEXT"),
+    ("locked_until", "TEXT"),
+    ("superseded_by", "INTEGER"),
+    # Set on a row created by severity-driven failover, pointing at the row on
+    # the unavailable primary channel it stood in for.
+    ("failover_of", "INTEGER"),
+    # Which channel this row was originally destined for before failover.
+    ("origin_channel", "TEXT"),
+)
+
+
+async def _table_columns(conn: aiosqlite.Connection, table: str) -> set[str]:
+    async with conn.execute(f"PRAGMA table_info({table})") as cursor:
+        return {row[1] for row in await cursor.fetchall()}
+
+
+# How an incident ended, and how we found out. See schema.sql.
+_INCIDENT_COLUMN_MIGRATIONS = (
+    ("correlation_group_id", "TEXT"),
+    ("acknowledged_at", "TEXT"),
+    ("acknowledged_by", "TEXT"),
+    ("acknowledged_via", "TEXT"),
+    ("resolved_at", "TEXT"),
+    ("resolved_via", "TEXT"),
+    ("resolution_source", "TEXT"),
+    ("resolution_detail", "TEXT"),
+)
+
+_COLUMN_MIGRATIONS = {
+    "outbox": _OUTBOX_COLUMN_MIGRATIONS,
+    "incidents": _INCIDENT_COLUMN_MIGRATIONS,
+}
+
+
+async def _ensure_columns(conn: aiosqlite.Connection) -> None:
+    for table, migrations in _COLUMN_MIGRATIONS.items():
+        existing = await _table_columns(conn, table)
+        for column, definition in migrations:
+            if column not in existing:
+                await conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
+
+
 async def _ensure_schema(conn: aiosqlite.Connection) -> None:
     """Apply idempotent schema additions before application work begins."""
 
     await conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    await _ensure_columns(conn)
     await conn.commit()
 
 

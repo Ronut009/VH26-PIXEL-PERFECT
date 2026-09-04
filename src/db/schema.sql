@@ -68,6 +68,21 @@ CREATE TABLE IF NOT EXISTS incidents (
     gap_history_json TEXT NOT NULL DEFAULT '[]',
     route_decision  TEXT,                       -- slack | pagerduty | email | suppressed
     root_cause_hint TEXT,                       -- from Anish's graph ranking
+    -- Provenance for how an incident ended. A fix can reach us three ways:
+    -- the monitor says so, a human acted in Slack/PagerDuty, or the alerts
+    -- simply stopped and we inferred it. All three must be distinguishable,
+    -- because "nobody told us, we guessed" is not the same claim as
+    -- "Prometheus sent resolved".
+    -- Set when the correlation graph has tied this incident to others in the
+    -- same cascade. Members other than the anchor stop posting their own card.
+    correlation_group_id TEXT,
+    acknowledged_at   TEXT,
+    acknowledged_by   TEXT,                     -- provider user id/name
+    acknowledged_via  TEXT,                     -- slack | pagerduty | dashboard
+    resolved_at       TEXT,
+    resolved_via      TEXT,                     -- slack | pagerduty | dashboard
+    resolution_source TEXT,                     -- monitor | operator | inferred_silence
+    resolution_detail TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -105,18 +120,139 @@ CREATE TABLE IF NOT EXISTS outbox (
     channel         TEXT NOT NULL,              -- slack | pagerduty | email
     action          TEXT NOT NULL,              -- create | update | resolve
     payload_json    TEXT NOT NULL,              -- the message body to send
-    status          TEXT NOT NULL DEFAULT 'pending',   -- pending | sent | failed | dead
+    -- pending | sent | dead | superseded. 'superseded' means a newer intent for
+    -- the same incident replaced this one during recovery coalescing, so it was
+    -- deliberately never sent rather than lost.
+    status          TEXT NOT NULL DEFAULT 'pending',
+    -- Only counts failures that are this row's own fault. A channel outage
+    -- parks a row without charging it an attempt, so an outage cannot
+    -- dead-letter the backlog just by lasting longer than the retry budget.
     attempts        INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     last_error      TEXT,
     external_ref    TEXT,                       -- Slack ts, PD dedup_key, for updates
+    -- Derived from severity at enqueue time; lower drains first, so a backlog
+    -- released after an outage delivers criticals before low-severity noise.
+    priority        INTEGER NOT NULL DEFAULT 2,
+    -- Lease held by the worker currently dispatching this row. A second worker
+    -- must be impossible to add safely without this: without a claim, two
+    -- workers select the same pending rows and both send them. The lease
+    -- expires so a worker that dies mid-dispatch releases its rows instead of
+    -- stranding them forever.
+    locked_by       TEXT,
+    locked_until    TEXT,
+    superseded_by   INTEGER,                    -- winning outbox_id, when collapsed
+    failover_of     INTEGER,                    -- primary row this stood in for
+    origin_channel  TEXT,                       -- channel intended before failover
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     sent_at         TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, next_attempt_at)
+CREATE INDEX IF NOT EXISTS idx_outbox_pending
+    ON outbox(status, next_attempt_at, priority, outbox_id)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_outbox_lease ON outbox(locked_until)
     WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_outbox_incident ON outbox(incident_id);
+
+-- ─────────────────────────────────────────────────────────────
+-- incident_groups: one storm, not N incidents.
+--
+-- The co-occurrence graph could already tell that a DB failure, an API
+-- failure and a pod failure were one cascade, but it only *annotated* each
+-- with a root-cause hint - so a three-service outage still posted three cards
+-- and a responder still had to work out they were the same event.
+--
+-- Two different incident ids matter here and they are deliberately separate:
+--
+--   anchor_incident_id  owns the Slack message. Fixed for the group's life,
+--                       because the card's external_ref (the Slack ts) belongs
+--                       to it - if the anchor moved, the card would jump to a
+--                       new message mid-incident.
+--   root_incident_id    the current ranked cause. Free to change as evidence
+--                       accumulates, because it is only rendered, never used
+--                       as an identity.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS incident_groups (
+    group_id            TEXT PRIMARY KEY,
+    scope_key           TEXT NOT NULL,
+    anchor_incident_id  TEXT NOT NULL,
+    root_incident_id    TEXT,
+    title               TEXT NOT NULL DEFAULT '',
+    severity            TEXT NOT NULL DEFAULT 'medium',
+    member_count        INTEGER NOT NULL DEFAULT 1,
+    status              TEXT NOT NULL DEFAULT 'OPEN',
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_groups_scope
+    ON incident_groups(scope_key, status);
+CREATE INDEX IF NOT EXISTS idx_incident_groups_anchor
+    ON incident_groups(anchor_incident_id);
+CREATE INDEX IF NOT EXISTS idx_incidents_group
+    ON incidents(correlation_group_id);
+
+-- ─────────────────────────────────────────────────────────────
+-- inbound_events: every signed callback we accept from a provider.
+-- The outbox is how state leaves this system; this is how it comes back.
+-- Providers retry deliveries, so the delivery id is the idempotency key:
+-- replaying the same Slack click or PagerDuty webhook must not re-transition
+-- an incident or append a second ledger entry.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS inbound_events (
+    inbound_id      TEXT PRIMARY KEY,           -- provider delivery/trigger id
+    provider        TEXT NOT NULL,              -- slack | pagerduty
+    kind            TEXT NOT NULL,              -- acknowledge | resolve | unknown
+    incident_id     TEXT,
+    actor           TEXT,                       -- provider user id, when known
+    status          TEXT NOT NULL DEFAULT 'applied',
+        -- applied | duplicate | ignored | rejected
+    detail          TEXT,
+    payload_sha256  TEXT NOT NULL DEFAULT '',
+    received_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbound_events_incident
+    ON inbound_events(incident_id, received_at DESC);
+
+-- ─────────────────────────────────────────────────────────────
+-- channel_health: one row per delivery channel. This is the system's
+-- answer to "how do you know Slack is down, and how do you know it is back?"
+-- The OutboxWorker never asks a single failed row whether a channel is
+-- healthy; it asks this table, which is driven by a circuit breaker fed by
+-- classified failures and cleared only by an explicit, side-effect-free probe.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS channel_health (
+    channel              TEXT PRIMARY KEY,          -- slack | pagerduty | email
+    state                TEXT NOT NULL DEFAULT 'CLOSED'
+        CHECK (state IN ('CLOSED', 'OPEN', 'HALF_OPEN')),
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    probe_backoff_step   INTEGER NOT NULL DEFAULT 0,
+    opened_at            TEXT,                      -- outage start, ISO8601
+    next_probe_at        TEXT,                      -- when to try auth.test again
+    last_success_at      TEXT,
+    last_failure_at      TEXT,
+    last_error           TEXT,
+    outage_count         INTEGER NOT NULL DEFAULT 0,
+    updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+-- channel_outages: closed-book record of every detected outage window, so the
+-- recovery digest and the dashboard can say exactly what the blind window was.
+CREATE TABLE IF NOT EXISTS channel_outages (
+    outage_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel         TEXT NOT NULL,
+    detected_at     TEXT NOT NULL,
+    recovered_at    TEXT,
+    probe_attempts  INTEGER NOT NULL DEFAULT 0,
+    queued_at_peak  INTEGER NOT NULL DEFAULT 0,
+    failed_over     INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_outages_channel
+    ON channel_outages(channel, detected_at DESC);
 
 -- delivery_intents: immutable, idempotent write-ahead records for external delivery.
 CREATE TABLE IF NOT EXISTS delivery_intents (

@@ -11,3 +11,6 @@ pytest==8.3.3
 pytest-asyncio==0.24.0
 PyJWT==2.13.0
 cryptography==50.0.1
+# Optional: only imported when ANTHROPIC_DIAGNOSIS_ENABLED is true.
+# The hosted-diagnosis tier for deployments without a local GPU.
+anthropic>=1.0,<2

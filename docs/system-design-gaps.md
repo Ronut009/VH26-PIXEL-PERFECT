@@ -1,0 +1,305 @@
+# System design gaps
+
+A pass over PulseGraph looking for what an experienced reviewer would attack
+next, now that the delivery and reconciliation planes are closed. Each entry
+states the gap, the concrete failure it produces, and the design that fixes it.
+
+Ordered by what gets asked first, not by effort.
+
+---
+
+## 1. The front door has no lock
+
+`POST /v1/ingest/prometheus` accepts anything from anyone. Meanwhile GitHub
+webhooks are HMAC-verified, and the new Slack and PagerDuty callbacks verify
+signatures and fail closed. The asymmetry is glaring: **the one endpoint that
+creates incidents is the one endpoint nobody has to prove anything to.**
+
+The interesting attack is not a flood, it is a *forgery*. Anyone who can reach
+the ingest URL can POST a `resolved` alert whose labels match a real, firing
+incident. Because dedupe keys on `service | alertname | severity | stable
+labels`, a forged resolve lands on the real incident and closes it. An attacker
+silences a production emergency with one HTTP request and no credentials — the
+exact inverse of what an alerting system is for.
+
+**Design.** Ingest is a trust boundary and should look like one:
+
+- A per-source shared secret with HMAC over the raw body, the same pattern
+  already used for GitHub and PagerDuty — Alertmanager can send a bearer token
+  or a signed proxy sits in front.
+- Bind a credential to a *scope*: a token issued for `staging/*` must not be
+  able to write incidents in `prod/eu-west`. Scope is already a first-class
+  concept (`scope_key`), so this is an authorisation check, not new modelling.
+- Treat `resolved` as a **privileged transition**. A `firing` alert from an
+  unknown source is noise; a `resolved` from an unknown source is an attack.
+
+## 2. The graph is quadratic, inside the global write lock
+
+This is the one I would push hardest on, because it degrades exactly when the
+product is supposed to shine.
+
+On every non-bypassed alert, `persist_and_observe`:
+
+1. selects **all** active incidents in the scope,
+2. calls `observe_incident`, which does an edge lookup + upsert **per related
+   incident**,
+3. then calls `rank_root_cause`, which scans **every edge** joined to active
+   incidents and re-ranks from scratch.
+
+With `A` active incidents in a scope, edges are `O(A²)` and step 3 is `O(A²)`
+per alert. All of it runs inside the `BEGIN IMMEDIATE` transaction, holding the
+single SQLite writer lock, while ingest requests queue behind it.
+
+The demo — ten duplicates and a three-service cascade — never reveals this,
+because `A` is about 4. A genuine incident with 200 concurrent distinct
+incidents in one cluster makes every subsequent alert do ~40,000 edge rows of
+work while holding the lock that all ingest depends on. **The system gets
+slowest precisely during the storm it exists to absorb.**
+
+**Design.**
+
+- **Bound the neighbourhood.** Correlation is only meaningful over a recent
+  window; cap co-occurrence to incidents active in the last N minutes and to
+  the top-K by recency. `O(A²)` becomes `O(K)` with K fixed.
+- **Move ranking out of the write path.** Root cause is an *enrichment*, not a
+  transactional invariant. Compute it incrementally, or on a debounced
+  background pass, and let the card update when it lands. Nothing about
+  delivering an incident should wait on a graph re-rank.
+- **Make it incremental.** Ranking recomputes global scores from scratch on
+  every alert; the decayed weights are additive, so scores can be maintained
+  per-incident and decayed lazily on read.
+
+## 3. Correlation is temporal only, and will produce confident nonsense
+
+Two services that break at the same time get an edge, whether or not they have
+anything to do with each other. During a broad event — a bad deploy, an AZ
+blip — *everything* co-occurs with everything, so edge weights spike uniformly
+and `rank_root_cause` confidently names whichever incident happened to fire
+first. A responder who is told the wrong root cause once will stop reading the
+field entirely, which is worse than not having it.
+
+**Design.** Co-occurrence should be evidence, not the whole model. Combine it
+with a **structural prior** — what *could* cause what:
+
+- Service dependency topology, from a service mesh, tracing spans, or a
+  declared manifest. An edge between two services with no call path is almost
+  certainly coincidence.
+- **The GitHub integration is already a topology source.** Repository
+  dependency manifests and the existing `service → repository` mapping give a
+  build-time dependency graph for free, from a component that is already built.
+- Score = decayed co-occurrence × structural plausibility. Report a
+  **confidence**, and say nothing when confidence is low. "No clear root cause"
+  is a trustworthy answer; a wrong one is not.
+
+This is also the honest answer to "is there ML in this?" — there does not need
+to be, and a prior plus decayed counts is more defensible than a model nobody
+can debug at 3am.
+
+## 4. Event time and processing time are mixed
+
+The quiet deadline is computed from **source** time:
+
+```python
+quiet_at_ms = _event_time_ms(event) + window   # event.fired_at, from the monitor
+```
+
+but `TimerWorker` fires it against **wall-clock** time (`time.time()`). The two
+are only interchangeable when every monitor's clock is correct and no event is
+ever delayed.
+
+- A monitor whose clock is 10 minutes slow produces a deadline already in the
+  past — the incident fires immediately, defeating batching entirely.
+- A clock 10 minutes fast delays the notification by 10 minutes.
+- Alerts replayed after a monitoring outage arrive with old `fired_at` and get
+  deadlines in the past, so a recovered Alertmanager causes a burst.
+
+`last_gap = max(0.0, ...)` already quietly clamps negative gaps, which is the
+symptom showing through.
+
+**Design.** Name the two clocks and keep them apart — this is the standard
+event-time/processing-time split:
+
+- Store both `fired_at` (event time, for the ledger and for gap statistics) and
+  `ingested_at` (processing time, which is already in the schema).
+- **Schedule on processing time.** Compute the window from event-time gaps, but
+  anchor the deadline to `ingested_at`, so scheduling never depends on a
+  third party's clock.
+- Track per-source skew (`ingested_at - fired_at`) and surface a source whose
+  skew exceeds a threshold as its own operational signal. A monitoring system
+  that silently trusts remote clocks is a monitoring system with a blind spot.
+
+## 5. Webhook retries inflate the numbers
+
+`normalize_prometheus` mints `event_id=uuid4()` per parse. Alertmanager retries
+on any non-2xx and re-sends on its own schedule, so the same logical alert
+arrives repeatedly and each arrival is a fresh event: a new ledger row, another
+`alert_count` increment, another outbox intent.
+
+Dedupe still collapses them onto one incident, so this does not produce extra
+Slack messages — but `alert_count` is the headline number on the card and in
+the pitch. "517 alerts collapsed" is not a number you want inflated by your own
+retry handling.
+
+**Design.** Idempotency belongs at the delivery boundary, not the identity one:
+derive the event id from what the *source* considers stable — Alertmanager's
+`groupKey` plus the alert fingerprint plus `startsAt` — and make `event_id` a
+unique key. A retry then becomes a no-op insert rather than a new event. The
+inbound plane already does exactly this with `inbound_events`; ingest should
+use the same pattern.
+
+## 6. Nothing watches the watcher
+
+If PulseGraph crashes, nobody finds out. There are no alerts about the alerting
+system, and its silence is indistinguishable from a quiet night — which is the
+same ambiguity the silence sweeper was built to resolve for incidents, left
+unresolved for the system itself.
+
+It is worse than a normal outage, because failures correlate: the thing most
+likely to take down PulseGraph is the same infrastructure event that should be
+generating the alerts it is failing to deliver.
+
+**Design.**
+
+- **A dead man's switch.** Emit a heartbeat on a fixed interval to an external
+  service (PagerDuty heartbeat, healthchecks.io); *absence* of the heartbeat
+  pages. The check must live somewhere PulseGraph cannot influence, which is
+  the whole point.
+- **Deploy outside the blast radius.** An alerting system inside the cluster it
+  monitors will be down when it is needed. It belongs in a different failure
+  domain — the same argument already made for PagerDuty as a fallback channel.
+- **Expose internal state as first-class signals**: outbox depth, dead-letter
+  count, breaker states, oldest pending row age, sweep lag. `channel_health`
+  and `channel_outages` already hold most of it; it needs an endpoint and a
+  dashboard tile.
+
+## 7. No backpressure — load is absorbed by getting slower
+
+Ingest takes the global write lock per event and does the full engine, graph,
+and ledger work synchronously before responding. There is no queue, no
+admission control, and no load shedding. Under a genuine storm the lock queue
+grows, HTTP requests time out, and Alertmanager retries — adding load in
+exactly the moment there is too much of it.
+
+**Design.** Split accept from process, which the outbox pattern already
+establishes on the way out:
+
+- Accept, validate, append to a durable intake queue, return `202`. The
+  expensive path drains asynchronously.
+- **Shed by severity, not arrival order.** Under pressure, drop or sample
+  `low`; never shed `critical`. The priority column added for outbox drain is
+  the same idea applied at the other end.
+- Publish a documented ingest rate limit per source, so a runaway alert rule
+  degrades its own source rather than everyone's.
+
+## 8. One channel, no ownership
+
+`SLACK_CHANNEL_ID` is a single global setting: every incident for every service
+goes to one channel and one PagerDuty key. Real organisations route by
+ownership, and routing is what makes an alerting system adoptable beyond one
+team.
+
+**Design.** Ownership as data, not configuration:
+
+- A routing table `service → (slack channel, escalation policy, owning team)`,
+  resolved at delivery time. The failover chain then becomes *per route*, so a
+  team without PagerDuty falls back differently from one with it.
+- Fall back to a catch-all channel for unmapped services, and surface the
+  unmapped list — unrouted alerts are an ownership gap worth showing.
+- The `service → repository` mapping in the GitHub integration is already
+  half of this table.
+
+## 9. No suppression, so deploys look like outages
+
+There is no maintenance window, no deploy-aware suppression, and no dependency
+suppression. A rolling deploy lights up every downstream service, and the
+system faithfully pages for all of it. Teams respond by muting the channel,
+which quietly defeats the entire product.
+
+**Design.**
+
+- **Maintenance windows** scoped by service and time, suppressing notification
+  while still recording incidents — suppressed, not discarded, so the audit
+  ledger stays complete.
+- **Deploy correlation.** The GitHub App already receives repository events;
+  an incident that starts within minutes of a deploy to its mapped repository
+  should say so on the card. That is a high-value, low-effort use of a
+  component that already exists.
+- **Dependency suppression.** If a database incident is the ranked root cause,
+  its downstream children are consequences; notify once for the cause and
+  summarise the effects. This is the same feature as cross-incident storm
+  grouping, seen from the routing side.
+
+## 10. Acknowledgement has no timeout
+
+Now that acknowledgement works, the obvious follow-up is what happens when it
+*doesn't*. Nothing escalates. A critical acknowledged by nobody sits exactly as
+quietly as one being actively worked, and an incident acknowledged then
+abandoned is invisible.
+
+**Design.** Ack is a promise with a deadline: if a critical is unacknowledged
+after N minutes, escalate to the next channel in the failover chain — the
+mechanism already exists, it just needs a timer as a trigger instead of an
+outage. The timer wheel already does durable, restart-surviving deadlines.
+
+## 11. Flapping will now produce churn
+
+The silence sweeper closes quiet incidents, and `_next_state` reopens a
+`RESOLVED` incident on the next alert. A service flapping on a cycle longer
+than its silence threshold will resolve and reopen indefinitely, and each
+transition posts a card update. Two correct features compose into a noise
+generator.
+
+**Design.** Damping, with hysteresis:
+
+- Track reopen count per fingerprint over a window; after k reopens, mark the
+  incident *flapping* and switch to a periodic digest instead of per-transition
+  updates.
+- Require a longer quiet period to close an incident that has already reopened
+  once — closing should get harder each time, not stay equally easy.
+- Flapping is itself a finding worth surfacing: it usually means the alert
+  threshold is wrong, which is an alert-quality problem the system is uniquely
+  placed to report.
+
+## 12. Nothing is ever deleted
+
+`raw_events`, `edges`, `outbox`, and now `inbound_events` grow without bound in
+a single SQLite file on local disk. There is no retention, archival, or
+compaction, and no answer for what happens at 50M rows.
+
+There is a real tension here worth naming rather than hiding: the ledger is
+**hash-chained**, so deleting old rows breaks verification. Retention and
+tamper-evidence pull in opposite directions.
+
+**Design.** Checkpoint rather than delete: periodically seal a range, store a
+signed checkpoint hash covering it, archive the rows to cold storage, and let
+`verify_chain.py` verify across checkpoints. That keeps the tamper-evidence
+property while bounding the live database — and "we thought about what happens
+to the audit log at scale" is a better answer than an unbounded file.
+
+---
+
+## Three ideas that raise the level
+
+Beyond closing gaps, these change what the system *is*.
+
+**Alert quality as the product.** Every fact needed to grade a team's alerting
+is already in the ledger: which alerts never got acknowledged, which resolved
+themselves before anyone looked, which fingerprints flap, which fire nightly
+and are always ignored. Today the system reduces noise; it could *report* on
+the noise — "these 6 rules produced 40% of your alerts and 0 acknowledgements"
+— and turn a fatigue filter into a system that gets alerting permanently
+fixed. It is a reporting query over data that already exists.
+
+**A feedback loop on grouping.** Correlation currently has no ground truth. A
+single "these were not related" / "this was the cause" control on the card
+gives labelled data, which can tune edge weights and root-cause thresholds per
+environment. It is the difference between a heuristic that is fixed at
+implementation time and one that improves with use — and it needs no ML, only
+a stored correction.
+
+**Confidence as a first-class output.** Several outputs are already assertions
+of differing strength: a confirmed resolve versus an inferred one, a strong
+causal chain versus a coincidence, a diagnosis grounded in source versus a
+fallback. The inferred-resolution label proved the pattern works. Applying it
+everywhere — every claim carrying how much it should be trusted — is what
+separates a tool responders believe from one they learn to second-guess.

@@ -11,7 +11,59 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     ENVIRONMENT: str = "dev"
     OUTBOX_POLL_INTERVAL_MS: int = 500
+    # Attempts a row may burn on its *own* faults before dead-lettering. A
+    # channel outage no longer consumes this budget, so an outage of any
+    # length can no longer silently destroy the backlog.
     OUTBOX_MAX_ATTEMPTS: int = 5
+
+    # Delivery circuit breaker. Consecutive channel-level failures before a
+    # channel is declared down, then the probe cadence used to notice it is
+    # back, and how many real rows are trialled before the breaker fully closes.
+    OUTBOX_BREAKER_FAILURE_THRESHOLD: int = 3
+    OUTBOX_PROBE_BASE_SECONDS: float = 5.0
+    OUTBOX_PROBE_MAX_SECONDS: float = 120.0
+    OUTBOX_HALF_OPEN_ALLOWANCE: int = 3
+
+    # How long a worker's claim on a row survives. Long enough that a slow
+    # provider call cannot lose its lease mid-send, short enough that a worker
+    # killed mid-dispatch releases its rows promptly.
+    OUTBOX_LEASE_SECONDS: float = 60.0
+    OUTBOX_BATCH_SIZE: int = 10
+
+    # Adaptive batching bounds. QUIET_WINDOW_MAX_MS caps any single predicted
+    # silence window; INCIDENT_MAX_BATCH_SPAN_MS caps how long one incident may
+    # keep deferring its own delivery, measured from its first alert.
+    QUIET_WINDOW_MAX_MS: int = 300_000
+    INCIDENT_MAX_BATCH_SPAN_MS: int = 600_000
+
+    # Email — the last hop of the failover chain, via any SMTP relay. Gmail
+    # needs an app password (not the account password) with 2FA enabled.
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
+    SMTP_TIMEOUT_SECONDS: float = 15.0
+    EMAIL_FROM: str = ""
+    EMAIL_TO: str = ""          # comma-separated
+
+    # Inbound callbacks. These endpoints are public, so an unset secret means
+    # the corresponding route rejects everything rather than trusting anyone.
+    SLACK_SIGNING_SECRET: str = ""
+    PAGERDUTY_WEBHOOK_SECRET: str = ""
+
+    # Presumed-resolution from absence of alerts. The threshold is a multiple
+    # of each incident's own EWMA gap, clamped between the floor and ceiling,
+    # so chatty and quiet services are judged on their own rhythm. Criticals
+    # get a much larger multiplier: wrongly closing a payment outage is far
+    # more costly than leaving it open a while longer.
+    SILENCE_RESOLVE_ENABLED: bool = True
+    SILENCE_RESOLVE_MULTIPLIER: float = 6.0
+    SILENCE_RESOLVE_CRITICAL_MULTIPLIER: float = 20.0
+    SILENCE_RESOLVE_MIN_MS: int = 900_000       # 15 min floor
+    SILENCE_RESOLVE_MAX_MS: int = 21_600_000    # 6 h ceiling
+    SILENCE_SWEEP_INTERVAL_SECONDS: float = 30.0
 
     # GitHub Phase 1 uses a GitHub App with Metadata: read and Contents: read
     # only. The private key and webhook secret belong in a secret manager in
@@ -55,6 +107,16 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OLLAMA_TIMEOUT_SECONDS: float = 30.0
     OLLAMA_MAX_OUTPUT_TOKENS: int = 2_048
+
+    # Hosted diagnosis, for deployments with no local GPU. Deliberately gated on
+    # its own flag rather than on the presence of an API key: sending repository
+    # source to a third party is a decision an operator makes explicitly, never
+    # a side effect of an environment variable being set somewhere.
+    ANTHROPIC_DIAGNOSIS_ENABLED: bool = False
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-opus-5"
+    ANTHROPIC_MAX_OUTPUT_TOKENS: int = 16_000
+    ANTHROPIC_TIMEOUT_SECONDS: float = 60.0
 
     @property
     def github_app_is_configured(self) -> bool:

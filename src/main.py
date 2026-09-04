@@ -13,8 +13,13 @@ from src.config import settings
 from src.contracts import NormalizedEvent
 from src.db.connection import Database, get_reader_connection
 from src.db.writer import DbWriter
+from src.engine.silence_sweeper import SilenceSweeper
 from src.engine.timer_wheel import TimerWheel
 from src.engine.timer_worker import TimerWorker
+from src.github_integration.anthropic_provider import (
+    AnthropicConfigurationError,
+    AnthropicDiagnosisProvider,
+)
 from src.github_integration.client import GitHubConfigurationError, GitHubReadOnlyClient
 from src.github_integration.diagnosis import DiagnosisService
 from src.github_integration.ollama_provider import (
@@ -23,9 +28,11 @@ from src.github_integration.ollama_provider import (
     OllamaLocalProvider,
 )
 from src.github_integration.router import create_github_router
+from src.inbound.router import create_inbound_router
 from src.ingest.normalize_datadog import normalize_datadog
 from src.ingest.normalize_grafana import normalize_grafana
 from src.ingest.prometheus import normalize_prometheus
+from src.outbox.channel_health import BreakerConfig
 from src.outbox.worker import OutboxWorker
 from src.stream.sse_broker import create_sse_router
 from src.utils.logging import configure_logging, get_logger
@@ -59,8 +66,27 @@ async def lifespan(app: FastAPI):
     # leaves the GitHub diagnosis endpoint available for its safe fallback,
     # while alert ingestion keeps its original startup path.
     ollama_provider: OllamaLocalProvider | None = None
+    hosted_provider: AnthropicDiagnosisProvider | None = None
     app.state.ollama_provider = None
+    app.state.hosted_provider = None
     app.state.diagnosis_service = DiagnosisService()
+
+    # Local first when both are configured: it is the option that keeps source
+    # inside the deployment, so it should win by default rather than by luck.
+    if settings.ANTHROPIC_DIAGNOSIS_ENABLED and not settings.OLLAMA_ENABLED:
+        try:
+            hosted_provider = AnthropicDiagnosisProvider(
+                settings.ANTHROPIC_API_KEY,
+                model=settings.ANTHROPIC_MODEL,
+                max_tokens=settings.ANTHROPIC_MAX_OUTPUT_TOKENS,
+                timeout=settings.ANTHROPIC_TIMEOUT_SECONDS,
+            )
+            app.state.hosted_provider = hosted_provider
+            app.state.diagnosis_service = DiagnosisService(hosted_provider)
+            logger.info("hosted_diagnosis_enabled", model=settings.ANTHROPIC_MODEL)
+        except (AnthropicConfigurationError, ValueError) as exc:
+            logger.warning("hosted_diagnosis_disabled", reason=str(exc))
+
     if settings.OLLAMA_ENABLED:
         try:
             ollama_provider = OllamaLocalProvider(
@@ -85,9 +111,22 @@ async def lifespan(app: FastAPI):
     timer_worker = TimerWorker(db, timer_wheel)
     recovered_deadline_count = await timer_worker.recover_persisted_deadlines()
     timer_worker.start()
-    worker = OutboxWorker(db)
+    worker = OutboxWorker(
+        db,
+        BreakerConfig(
+            failure_threshold=settings.OUTBOX_BREAKER_FAILURE_THRESHOLD,
+            probe_base_seconds=settings.OUTBOX_PROBE_BASE_SECONDS,
+            probe_max_seconds=settings.OUTBOX_PROBE_MAX_SECONDS,
+            half_open_allowance=settings.OUTBOX_HALF_OPEN_ALLOWANCE,
+        ),
+    )
     worker.start()
+    # Closes incidents whose alerts simply stopped, which is how most fixes
+    # actually reach us. Off by config, not by omission.
+    silence_sweeper = SilenceSweeper(db)
+    silence_sweeper.start()
 
+    app.state.silence_sweeper = silence_sweeper
     app.state.db = db
     app.state.writer = writer
     app.state.worker = worker
@@ -103,11 +142,14 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await timer_worker.stop()
+        await silence_sweeper.stop()
         await worker.stop()
         if github_client is not None:
             await github_client.aclose()
         if ollama_provider is not None:
             await ollama_provider.aclose()
+        if hosted_provider is not None:
+            await hosted_provider.aclose()
         await db.close()
         logger.info("app_stopped")
 
@@ -115,6 +157,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Alert Fatigue Buster — Ingest Spine", lifespan=lifespan)
 app.include_router(create_sse_router(settings.DATABASE_PATH))
 app.include_router(create_github_router())
+app.include_router(create_inbound_router())
 
 
 @app.post("/v1/ingest/prometheus")

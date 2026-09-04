@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import aiosqlite
 
+from src.config import settings
 from src.contracts import CardChange, DeliveryIntent, EngineDecision, NormalizedEvent, Severity
 
 from .adaptive_ewma import calculate_quiet_deadline
@@ -18,6 +19,11 @@ from .dedupe import generate_fingerprint, is_exact_duplicate
 from .incident_machine import transition_state
 from src.graph.observe_incident import observe_incident
 from src.graph.root_cause_ranker import rank_root_cause
+from src.graph.storm_grouping import (
+    assign_group,
+    redirect_member_deliveries,
+    refresh_group_for_member,
+)
 
 
 _SEVERITY_MAP: dict[str, Severity] = {
@@ -58,6 +64,29 @@ def _event_payload(event: NormalizedEvent, scope_key: str) -> dict[str, Any]:
 
 def _severity(event: NormalizedEvent) -> Severity:
     return _SEVERITY_MAP.get(event.severity_raw.lower(), "medium")
+
+
+def _bounded_deadline(
+    quiet_at_ms: int | None, first_alert_ms: int, now_ms: int
+) -> int | None:
+    """Stop an ongoing storm from deferring its own notification forever.
+
+    Each new alert recomputes the quiet deadline as ``now + window``, so a
+    service that keeps flapping keeps pushing its own delivery into the future
+    and the incident is never announced at all. The adaptive window still
+    decides *when* inside the budget; this decides that there is a budget.
+    Once the ceiling is reached the incident fires with whatever it has, and
+    later alerts keep updating the same card.
+    """
+
+    if quiet_at_ms is None:
+        return None
+
+    ceiling = first_alert_ms + settings.INCIDENT_MAX_BATCH_SPAN_MS
+    if first_alert_ms <= 0 or quiet_at_ms <= ceiling:
+        return quiet_at_ms
+    # Never schedule a deadline in the past; a breached ceiling fires next tick.
+    return max(ceiling, now_ms + 1)
 
 
 def _payload_json(
@@ -208,7 +237,9 @@ async def process_event(
     if record is None:
         state = _new_incident_state(normalized_event)
         quiet = (
-            calculate_quiet_deadline([], 0.0, event_time_ms)
+            calculate_quiet_deadline(
+                [], 0.0, event_time_ms, settings.QUIET_WINDOW_MAX_MS
+            )
             if state != "RESOLVED"
             else {"quiet_at_ms": None, "mean_gap": 0.0, "variance": 0.0}
         )
@@ -242,9 +273,17 @@ async def process_event(
     state = _next_state(record, normalized_event)
     last_gap = max(0.0, float(event_time_ms - record.last_seen_ms))
     quiet = (
-        calculate_quiet_deadline(list(record.gap_history), last_gap, event_time_ms)
+        calculate_quiet_deadline(
+            list(record.gap_history),
+            last_gap,
+            event_time_ms,
+            settings.QUIET_WINDOW_MAX_MS,
+        )
         if state != "RESOLVED"
         else {"quiet_at_ms": None, "mean_gap": 0.0, "variance": 0.0}
+    )
+    quiet["quiet_at_ms"] = _bounded_deadline(
+        quiet["quiet_at_ms"], record.first_alert_ms, event_time_ms
     )
     incident_id = str(record.incident_id)
     payload = {
@@ -301,6 +340,26 @@ async def persist_and_observe(
             "UPDATE incidents SET root_cause_hint = ? WHERE incident_id = ?",
             (decision.root_cause_hint, str(decision.incident_id)),
         )
+
+    # Correlation stops at annotation unless something acts on it. If this
+    # incident is now strongly tied to others, they become one storm and only
+    # the anchor keeps a card - so a three-service cascade pages once, not
+    # three times, and the consequences stop competing with their own cause.
+    incident_id = str(decision.incident_id)
+    assignment = await assign_group(transaction_obj, incident_id, decision.scope_key)
+    if assignment is None:
+        # No new correlation, but this incident's own state just changed, so a
+        # storm it already belongs to needs its derived facts recomputed.
+        assignment = await refresh_group_for_member(transaction_obj, incident_id)
+    if (
+        assignment is not None
+        and assignment.is_multi_member
+        and assignment.anchor_incident_id != incident_id
+    ):
+        await redirect_member_deliveries(
+            transaction_obj, incident_id, assignment.anchor_incident_id
+        )
+
     return decision
 
 
