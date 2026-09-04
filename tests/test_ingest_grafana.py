@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 
+from tests.conftest import INGEST_HEADERS
 from src.engine.db_adapter import persist_decision
 from src.engine.process_event import process_event
 from src.ingest.normalize_grafana import normalize_grafana
@@ -173,7 +174,9 @@ def test_normalize_grafana_rejects_missing_or_invalid_required_fields(
 
 
 def test_grafana_route_processes_a_valid_payload(api_client, grafana_payload) -> None:
-    response = api_client.post("/v1/ingest/grafana", json=grafana_payload)
+    response = api_client.post(
+        "/v1/ingest/grafana", json=grafana_payload, headers=INGEST_HEADERS
+    )
 
     assert response.status_code == 200
     assert response.json()["ingested"] == 1
@@ -181,7 +184,9 @@ def test_grafana_route_processes_a_valid_payload(api_client, grafana_payload) ->
 
 
 def test_grafana_route_returns_422_for_invalid_payload(api_client) -> None:
-    response = api_client.post("/v1/ingest/grafana", json={"alerts": []})
+    response = api_client.post(
+        "/v1/ingest/grafana", json={"alerts": []}, headers=INGEST_HEADERS
+    )
 
     assert response.status_code == 422
     assert "invalid grafana payload" in response.json()["detail"]
@@ -191,7 +196,7 @@ def test_grafana_route_returns_422_for_malformed_json(api_client) -> None:
     response = api_client.post(
         "/v1/ingest/grafana",
         content="{not json",
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", **INGEST_HEADERS},
     )
 
     assert response.status_code == 422

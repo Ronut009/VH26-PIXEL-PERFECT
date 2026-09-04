@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -14,11 +15,36 @@ FIXTURE_PATH = ROOT / "tests" / "fixtures" / "prometheus_sample.json"
 INGEST_URL = "http://localhost:8000/v1/ingest/prometheus"
 
 
+
+def ingest_headers() -> dict[str, str]:
+    """Credential for the ingest endpoint.
+
+    Ingest authenticates by default, so a script that posts alerts must present
+    a token exactly as Alertmanager would. Taken from INGEST_TOKEN, else the
+    first entry of the backend's own INGEST_TOKENS, so a working .env needs no
+    extra setup here.
+    """
+
+    token = os.environ.get("INGEST_TOKEN", "").strip()
+    if not token:
+        first = settings.INGEST_TOKENS.split(",")[0].strip()
+        parts = first.split(":")
+        token = parts[1].strip() if len(parts) >= 2 else ""
+    if not token:
+        print(
+            "  ! No ingest token found. Set INGEST_TOKEN, or INGEST_TOKENS in .env.",
+            file=sys.stderr,
+        )
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def main() -> None:
     payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
     print(f"POSTing fixture ({len(payload['alerts'])} alerts) to {INGEST_URL} ...")
-    response = httpx.post(INGEST_URL, json=payload, timeout=10.0)
+    response = httpx.post(
+        INGEST_URL, json=payload, headers=ingest_headers(), timeout=10.0
+    )
     print(f"HTTP {response.status_code}")
     print(json.dumps(response.json(), indent=2))
 

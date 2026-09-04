@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import secrets
 import sqlite3
 import subprocess
@@ -250,11 +251,33 @@ def grafana(service: str, alertname: str, severity: str, message: str) -> dict[s
 rejected: dict[str, str] = {}
 
 
+def ingest_headers() -> dict[str, str]:
+    """Credential for the ingest endpoint.
+
+    Ingest authenticates by default, so the demo must present a token exactly
+    as Alertmanager would. Taken from INGEST_TOKEN, else the first entry of the
+    backend's own INGEST_TOKENS, so a working .env needs no extra setup.
+    """
+
+    # Imported here, matching this module's pattern of loading settings lazily
+    # so the offline paths work without a configured app.
+    from src.config import settings
+
+    token = os.environ.get("INGEST_TOKEN", "").strip()
+    if not token:
+        first = settings.INGEST_TOKENS.split(",")[0].strip()
+        parts = first.split(":")
+        token = parts[1].strip() if len(parts) >= 2 else ""
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 async def post(client: httpx.AsyncClient, url: str, payload: dict[str, Any]) -> bool:
     """Send one webhook. A rejection is recorded, never counted as delivered."""
 
     try:
-        response = await client.post(url, json=payload, timeout=15.0)
+        response = await client.post(
+            url, json=payload, headers=ingest_headers(), timeout=15.0
+        )
         if response.status_code >= 400:
             rejected.setdefault(url, f"HTTP {response.status_code}: {response.text[:160]}")
             return False

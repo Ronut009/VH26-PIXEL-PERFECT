@@ -96,6 +96,8 @@ see `web/README.md` for how the dashboard degrades without it.
 python src/main.py
 
 # Terminal 2 — run the storm replay
+# Ingest authenticates, so set a token in .env (INGEST_TOKENS) first; the
+# scripts read it from there, or from INGEST_TOKEN if you prefer to export one.
 python scripts/storm_replay.py --delay 1
 
 # Terminal 3 (optional) — watch the raw SSE stream
@@ -110,6 +112,8 @@ a critical payment failure that immediately bypasses aggregation.
 | Variable | Purpose |
 |---|---|
 | `DATABASE_PATH` | Path to the SQLite file (default `data/alerts.db`) |
+| `INGEST_AUTH_ENABLED` | Require a credential on `/v1/ingest/*` (default `true`; fails closed when no tokens are set) |
+| `INGEST_TOKENS` | `name:token[:scope]`, comma-separated. Scope is a prefix over `environment/cluster`, so a staging token cannot write production |
 | `SLACK_BOT_TOKEN` | Bot token with `chat:write` + `chat:write.public` scopes |
 | `SLACK_CHANNEL_ID` | Channel the outbox posts consolidated incidents to |
 | `PAGERDUTY_INTEGRATION_KEY` | Events API v2 integration key for critical-bypass paging |

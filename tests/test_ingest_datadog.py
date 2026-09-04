@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 
+from tests.conftest import INGEST_HEADERS
 from src.engine.db_adapter import persist_decision
 from src.engine.process_event import process_event
 from src.ingest.normalize_datadog import normalize_datadog
@@ -137,7 +138,9 @@ def test_normalize_datadog_rejects_missing_or_invalid_required_fields(
 
 
 def test_datadog_route_processes_a_valid_payload(api_client, datadog_payload) -> None:
-    response = api_client.post("/v1/ingest/datadog", json=datadog_payload)
+    response = api_client.post(
+        "/v1/ingest/datadog", json=datadog_payload, headers=INGEST_HEADERS
+    )
 
     assert response.status_code == 200
     assert response.json()["ingested"] == 1
@@ -145,7 +148,11 @@ def test_datadog_route_processes_a_valid_payload(api_client, datadog_payload) ->
 
 
 def test_datadog_route_returns_422_for_invalid_payload(api_client) -> None:
-    response = api_client.post("/v1/ingest/datadog", json={"event": {"title": "missing"}})
+    response = api_client.post(
+        "/v1/ingest/datadog",
+        json={"event": {"title": "missing"}},
+        headers=INGEST_HEADERS,
+    )
 
     assert response.status_code == 422
     assert "invalid datadog payload" in response.json()["detail"]
@@ -155,7 +162,7 @@ def test_datadog_route_returns_422_for_malformed_json(api_client) -> None:
     response = api_client.post(
         "/v1/ingest/datadog",
         content="{not json",
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", **INGEST_HEADERS},
     )
 
     assert response.status_code == 422

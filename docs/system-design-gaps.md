@@ -4,11 +4,12 @@ A pass over PulseGraph looking for what an experienced reviewer would attack
 next, now that the delivery and reconciliation planes are closed. Each entry
 states the gap, the concrete failure it produces, and the design that fixes it.
 
-Ordered by what gets asked first, not by effort.
+Ordered by what gets asked first, not by effort. Gaps 1 and 2 are now
+fixed; the rest stand.
 
 ---
 
-## 1. The front door has no lock
+## 1. The front door has no lock — FIXED
 
 `POST /v1/ingest/prometheus` accepts anything from anyone. Meanwhile GitHub
 webhooks are HMAC-verified, and the new Slack and PagerDuty callbacks verify
@@ -22,18 +23,32 @@ labels`, a forged resolve lands on the real incident and closes it. An attacker
 silences a production emergency with one HTTP request and no credentials — the
 exact inverse of what an alerting system is for.
 
-**Design.** Ingest is a trust boundary and should look like one:
+**Fixed** in [src/ingest/auth.py](../src/ingest/auth.py), with two checks,
+because authentication alone is not enough:
 
-- A per-source shared secret with HMAC over the raw body, the same pattern
-  already used for GitHub and PagerDuty — Alertmanager can send a bearer token
-  or a signed proxy sits in front.
-- Bind a credential to a *scope*: a token issued for `staging/*` must not be
-  able to write incidents in `prod/eu-west`. Scope is already a first-class
-  concept (`scope_key`), so this is an authorisation check, not new modelling.
-- Treat `resolved` as a **privileged transition**. A `firing` alert from an
-  unknown source is noise; a `resolved` from an unknown source is an attack.
+- **Who are you.** A bearer token compared in constant time, presented as
+  `Authorization: Bearer …` or `X-PulseGraph-Token`. Bearer rather than a body
+  HMAC because Alertmanager can set an `Authorization` header natively but
+  cannot sign a request body — a scheme the sender cannot implement is a scheme
+  that ends up switched off.
+- **What may you say.** Every credential is bound to a scope prefix over
+  `environment/cluster`. A staging token cannot write *or resolve* anything in
+  `production/eu-west`, so a leaked staging credential cannot silence
+  production. Scope is already the boundary the engine dedupes within, so this
+  is authorisation rather than new modelling.
 
-## 2. The graph is quadratic, inside the global write lock
+Two details worth keeping: the whole batch is authorised before any of it is
+written, so a payload containing one out-of-scope alert cannot half-apply; and
+with `INGEST_AUTH_ENABLED` true and no tokens configured, ingest returns 503
+rather than falling open — an unauthenticated alerting system is worse than a
+loudly misconfigured one.
+
+Enabling this **breaks any sender that does not present a token**, which is the
+correct outcome and was the point. `scripts/` read the token from
+`INGEST_TOKENS` in `.env` (or `INGEST_TOKEN`), so the demo keeps working once
+one is set.
+
+## 2. The graph is quadratic, inside the global write lock — FIXED
 
 This is the one I would push hardest on, because it degrades exactly when the
 product is supposed to shine.
@@ -56,18 +71,29 @@ incidents in one cluster makes every subsequent alert do ~40,000 edge rows of
 work while holding the lock that all ingest depends on. **The system gets
 slowest precisely during the storm it exists to absorb.**
 
-**Design.**
+**Fixed** by bounding both halves:
 
-- **Bound the neighbourhood.** Correlation is only meaningful over a recent
-  window; cap co-occurrence to incidents active in the last N minutes and to
-  the top-K by recency. `O(A²)` becomes `O(K)` with K fixed.
-- **Move ranking out of the write path.** Root cause is an *enrichment*, not a
-  transactional invariant. Compute it incrementally, or on a debounced
-  background pass, and let the card update when it lands. Nothing about
-  delivering an incident should wait on a graph re-rank.
-- **Make it incremental.** Ranking recomputes global scores from scratch on
-  every alert; the decayed weights are additive, so scores can be maintained
-  per-incident and decayed lazily on read.
+- **The neighbourhood.** Correlation now considers only incidents active
+  within `CORRELATION_WINDOW_MS` (15 min), ordered by recency and capped at
+  `CORRELATION_MAX_NEIGHBOURS` (25). `O(A)` per alert becomes `O(K)` with K
+  fixed, so total edges grow with alerts rather than alerts squared.
+- **The ranking.** `rank_root_cause` now takes a `candidate_ids` set and ranks
+  within the same bounded neighbourhood. That is cheaper *and* more correct: a
+  global rank names the loudest thing anywhere in the scope, so a large
+  unrelated incident could outweigh the actual leader of the cascade being
+  explained, and the hint on the card would describe a different event. The
+  unrestricted path keeps a `DEFAULT_MAX_EDGES` backstop so a pathological
+  graph degrades the hint rather than the write transaction.
+
+Measured on 75 active incidents in one scope, ten alerts: **795 edges before,
+240 after** — and the gap widens quadratically with the size of the storm.
+[tests/test_graph_bounds.py](../tests/test_graph_bounds.py) pins the bound, the
+window, and the scoped ranking.
+
+**Still outstanding:** ranking remains *inside* the write transaction. It is
+bounded now, so it no longer scales with the storm, but root cause is an
+enrichment rather than a transactional invariant and belongs on a debounced
+background pass. That is the remaining half of this gap.
 
 ## 3. Correlation is temporal only, and will produce confident nonsense
 

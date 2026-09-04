@@ -10,6 +10,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.conftest import INGEST_HEADERS
 from src.github_integration.client import (
     BranchReference,
     GitBlob,
@@ -253,7 +254,12 @@ def _ingest_checkout_incident(client: TestClient) -> str:
             }
         ],
     }
-    assert client.post("/v1/ingest/grafana", json=payload).status_code == 200
+    assert (
+        client.post(
+            "/v1/ingest/grafana", json=payload, headers=INGEST_HEADERS
+        ).status_code
+        == 200
+    )
     incidents = client.get("/v1/incidents/recent?since=1970-01-01T00:00:00Z")
     assert incidents.status_code == 200
     return incidents.json()["incidents"][0]["incident_id"]

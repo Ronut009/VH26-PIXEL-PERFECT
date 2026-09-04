@@ -45,10 +45,28 @@ def _event_time_ms(event: NormalizedEvent) -> int:
     return int(fired_at.timestamp() * 1000)
 
 
-def _scope_key(event: NormalizedEvent) -> str:
+def _iso_ms(epoch_ms: int) -> str:
+    """Format an epoch millisecond value the way incident timestamps are stored."""
+
+    moment = datetime.fromtimestamp(max(0, epoch_ms) / 1000, tz=timezone.utc)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+
+
+def scope_key_for(event: NormalizedEvent) -> str:
+    """The isolation boundary an event belongs to.
+
+    Public because ingest authorisation has to answer "may this source write
+    this scope" using exactly the scope the engine will later dedupe within.
+    Two different derivations here would be a security hole, not a style issue.
+    """
+
     environment = event.labels.get("environment", "default")
     cluster = event.labels.get("cluster", event.labels.get("namespace", "default"))
     return f"{environment}/{cluster}"
+
+
+# Retained for internal callers written against the original private name.
+_scope_key = scope_key_for
 
 
 def _event_payload(event: NormalizedEvent, scope_key: str) -> dict[str, Any]:
@@ -321,20 +339,47 @@ async def persist_and_observe(
     if decision.is_critical_bypass:
         return decision
 
+    # Correlate against a bounded neighbourhood, not every active incident in
+    # the scope. This ran per alert and did an edge upsert per related
+    # incident, so with A active incidents the work was O(A) per alert and the
+    # edge set grew O(A**2) - all inside the write transaction holding the
+    # single SQLite writer lock that ingest queues behind. The system got
+    # slowest during exactly the storm it exists to absorb.
+    #
+    # Two bounds make it O(K): correlation is only meaningful over a recent
+    # window, and past the most recent K neighbours the extra edges add cost
+    # without adding evidence.
+    window_start = _iso_ms(
+        _event_time_ms(decision.event) - settings.CORRELATION_WINDOW_MS
+    )
     placeholders = ", ".join("?" for _ in _ACTIVE_STATES)
     async with transaction_obj.execute(
         f"""
-        SELECT stable_fingerprint
+        SELECT incident_id, stable_fingerprint
         FROM incidents
         WHERE scope_key = ? AND status IN ({placeholders})
+          AND last_alert_at >= ?
+        ORDER BY last_alert_at DESC
+        LIMIT ?
         """,
-        (decision.scope_key, *_ACTIVE_STATES),
+        (
+            decision.scope_key,
+            *_ACTIVE_STATES,
+            window_start,
+            settings.CORRELATION_MAX_NEIGHBOURS,
+        ),
     ) as cursor:
         rows = await cursor.fetchall()
     fingerprints = tuple(row["stable_fingerprint"] for row in rows)
     await observe_incident(transaction_obj, decision.incident_id, fingerprints)
 
-    decision.root_cause_hint = await rank_root_cause(transaction_obj)
+    # Rank within the same bounded neighbourhood. A global rank both cost
+    # O(edges) per alert and answered the wrong question - "the loudest thing
+    # anywhere" rather than "what led the incidents related to this one".
+    candidates = tuple(row["incident_id"] for row in rows)
+    decision.root_cause_hint = await rank_root_cause(
+        transaction_obj, candidate_ids=candidates
+    )
     if decision.root_cause_hint is not None:
         await transaction_obj.execute(
             "UPDATE incidents SET root_cause_hint = ? WHERE incident_id = ?",
@@ -363,4 +408,4 @@ async def persist_and_observe(
     return decision
 
 
-__all__ = ["persist_and_observe", "process_event"]
+__all__ = ["persist_and_observe", "process_event", "scope_key_for"]

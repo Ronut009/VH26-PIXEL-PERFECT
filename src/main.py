@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 
 
 if __package__ in (None, ""):
@@ -29,6 +29,15 @@ from src.github_integration.ollama_provider import (
 )
 from src.github_integration.router import create_github_router
 from src.inbound.router import create_inbound_router
+from src.engine.process_event import scope_key_for
+from src.ingest.auth import (
+    IngestAuthError,
+    IngestNotConfigured,
+    IngestScopeError,
+    authenticate,
+    authorize_scope,
+    parse_tokens,
+)
 from src.ingest.normalize_datadog import normalize_datadog
 from src.ingest.normalize_grafana import normalize_grafana
 from src.ingest.prometheus import normalize_prometheus
@@ -126,6 +135,16 @@ async def lifespan(app: FastAPI):
     silence_sweeper = SilenceSweeper(db)
     silence_sweeper.start()
 
+    app.state.ingest_credentials = parse_tokens(settings.INGEST_TOKENS)
+    if settings.INGEST_AUTH_ENABLED and not app.state.ingest_credentials:
+        # Loud, because the failure is silent otherwise: ingest returns 503 and
+        # a misconfigured deployment looks like a broken one.
+        logger.error(
+            "ingest_auth_unconfigured",
+            detail="INGEST_AUTH_ENABLED is true but INGEST_TOKENS is empty; "
+            "ingest will refuse every request until a token is configured",
+        )
+
     app.state.silence_sweeper = silence_sweeper
     app.state.db = db
     app.state.writer = writer
@@ -160,8 +179,49 @@ app.include_router(create_github_router())
 app.include_router(create_inbound_router())
 
 
+def _authenticate_ingest(
+    request: Request, authorization: str | None, header_token: str | None
+):
+    """Identify the caller, or fail the request. Returns None when auth is off."""
+
+    if not settings.INGEST_AUTH_ENABLED:
+        return None
+    try:
+        return authenticate(
+            request.app.state.ingest_credentials, authorization, header_token
+        )
+    except IngestNotConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except IngestAuthError as exc:
+        # Deliberately uninformative to the caller; the detail is in our logs.
+        logger.warning("ingest_auth_rejected", reason=str(exc))
+        raise HTTPException(status_code=401, detail="invalid ingest credential") from exc
+
+
+def _authorize_event(credential, event: NormalizedEvent) -> None:
+    """Confirm the source may write the scope this event lands in."""
+
+    if credential is None:
+        return
+    try:
+        authorize_scope(credential, scope_key_for(event))
+    except IngestScopeError as exc:
+        logger.warning(
+            "ingest_scope_rejected",
+            source=credential.name,
+            service=event.service,
+            reason=str(exc),
+        )
+        raise HTTPException(status_code=403, detail="scope not permitted") from exc
+
+
 @app.post("/v1/ingest/prometheus")
-async def ingest_prometheus(request: Request):
+async def ingest_prometheus(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_pulsegraph_token: str | None = Header(default=None),
+):
+    credential = _authenticate_ingest(request, authorization, x_pulsegraph_token)
     body = await request.json()
 
     try:
@@ -172,6 +232,11 @@ async def ingest_prometheus(request: Request):
     db: Database = request.app.state.db
     writer: DbWriter = request.app.state.writer
 
+    # Authorise every event before writing any of them, so a batch containing
+    # one out-of-scope alert cannot half-apply.
+    for event in events:
+        _authorize_event(credential, event)
+
     results = []
     for event in events:
         async with db.write_lock:
@@ -181,8 +246,16 @@ async def ingest_prometheus(request: Request):
     return {"status": "ok", "ingested": len(results), "results": results}
 
 
-async def _ingest_normalized_events(request: Request, normalizer, source: str):
+async def _ingest_normalized_events(
+    request: Request,
+    normalizer,
+    source: str,
+    authorization: str | None = None,
+    header_token: str | None = None,
+):
     """Parse one provider's payload and send its normalized events to the writer."""
+
+    credential = _authenticate_ingest(request, authorization, header_token)
 
     try:
         body = await request.json()
@@ -192,6 +265,9 @@ async def _ingest_normalized_events(request: Request, normalizer, source: str):
 
     db: Database = request.app.state.db
     writer: DbWriter = request.app.state.writer
+
+    for event in events:
+        _authorize_event(credential, event)
 
     results = []
     for event in events:
@@ -203,13 +279,25 @@ async def _ingest_normalized_events(request: Request, normalizer, source: str):
 
 
 @app.post("/v1/ingest/datadog")
-async def ingest_datadog(request: Request):
-    return await _ingest_normalized_events(request, normalize_datadog, "datadog")
+async def ingest_datadog(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_pulsegraph_token: str | None = Header(default=None),
+):
+    return await _ingest_normalized_events(
+        request, normalize_datadog, "datadog", authorization, x_pulsegraph_token
+    )
 
 
 @app.post("/v1/ingest/grafana")
-async def ingest_grafana(request: Request):
-    return await _ingest_normalized_events(request, normalize_grafana, "grafana")
+async def ingest_grafana(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_pulsegraph_token: str | None = Header(default=None),
+):
+    return await _ingest_normalized_events(
+        request, normalize_grafana, "grafana", authorization, x_pulsegraph_token
+    )
 
 
 @app.get("/v1/incidents/recent")

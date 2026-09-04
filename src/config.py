@@ -48,6 +48,25 @@ class Settings(BaseSettings):
     EMAIL_FROM: str = ""
     EMAIL_TO: str = ""          # comma-separated
 
+    # Correlation bounds. The co-occurrence graph ran unbounded on every alert:
+    # every active incident in the scope became a neighbour, and root cause was
+    # re-ranked over every edge, inside the write transaction. Both grew with
+    # the square of the active set, so the graph was slowest during a storm.
+    # A recent window plus a neighbour cap makes the per-alert cost constant.
+    CORRELATION_WINDOW_MS: int = 900_000        # 15 min
+    CORRELATION_MAX_NEIGHBOURS: int = 25
+
+    # Alert ingestion is a trust boundary: it is the endpoint that creates
+    # incidents, and a forged `resolved` alert closes a real one. Enabled by
+    # default, and with no tokens configured it refuses ingest rather than
+    # falling open - an unauthenticated alerting system is worse than one that
+    # is loudly misconfigured.
+    INGEST_AUTH_ENABLED: bool = True
+    # Comma-separated `name:token[:scope]`. Scope is a prefix over
+    # `environment/cluster`; "*" means any. Bind staging tokens to staging so a
+    # leaked one cannot silence production.
+    INGEST_TOKENS: str = ""
+
     # Inbound callbacks. These endpoints are public, so an unset secret means
     # the corresponding route rejects everything rather than trusting anyone.
     SLACK_SIGNING_SECRET: str = ""
