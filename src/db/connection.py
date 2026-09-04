@@ -57,9 +57,16 @@ _INCIDENT_COLUMN_MIGRATIONS = (
     ("resolution_detail", "TEXT"),
 )
 
+_GRAPH_SCOPE_COLUMN_MIGRATIONS = (
+    ("observed_revision", "INTEGER NOT NULL DEFAULT 0"),
+    ("ranked_revision", "INTEGER NOT NULL DEFAULT 0"),
+    ("ranked_at", "TEXT"),
+)
+
 _COLUMN_MIGRATIONS = {
     "outbox": _OUTBOX_COLUMN_MIGRATIONS,
     "incidents": _INCIDENT_COLUMN_MIGRATIONS,
+    "graph_scope_stats": _GRAPH_SCOPE_COLUMN_MIGRATIONS,
 }
 
 

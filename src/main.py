@@ -28,6 +28,7 @@ from src.github_integration.ollama_provider import (
     OllamaLocalProvider,
 )
 from src.github_integration.router import create_github_router
+from src.graph.root_cause_worker import RootCauseWorker
 from src.inbound.router import create_inbound_router
 from src.engine.process_event import scope_key_for
 from src.ingest.auth import (
@@ -134,6 +135,10 @@ async def lifespan(app: FastAPI):
     # actually reach us. Off by config, not by omission.
     silence_sweeper = SilenceSweeper(db)
     silence_sweeper.start()
+    # Root cause is an enrichment, so it is ranked off the write path and
+    # debounced per scope rather than once per alert.
+    root_cause_worker = RootCauseWorker(db)
+    root_cause_worker.start()
 
     app.state.ingest_credentials = parse_tokens(settings.INGEST_TOKENS)
     if settings.INGEST_AUTH_ENABLED and not app.state.ingest_credentials:
@@ -146,6 +151,7 @@ async def lifespan(app: FastAPI):
         )
 
     app.state.silence_sweeper = silence_sweeper
+    app.state.root_cause_worker = root_cause_worker
     app.state.db = db
     app.state.writer = writer
     app.state.worker = worker
@@ -162,6 +168,7 @@ async def lifespan(app: FastAPI):
     finally:
         await timer_worker.stop()
         await silence_sweeper.stop()
+        await root_cause_worker.stop()
         await worker.stop()
         if github_client is not None:
             await github_client.aclose()

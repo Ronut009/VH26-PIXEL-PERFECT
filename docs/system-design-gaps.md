@@ -90,10 +90,31 @@ Measured on 75 active incidents in one scope, ten alerts: **795 edges before,
 [tests/test_graph_bounds.py](../tests/test_graph_bounds.py) pins the bound, the
 window, and the scoped ranking.
 
-**Still outstanding:** ranking remains *inside* the write transaction. It is
-bounded now, so it no longer scales with the storm, but root cause is an
-enrichment rather than a transactional invariant and belongs on a debounced
-background pass. That is the remaining half of this gap.
+**The remaining half is now done too.** Ranking has left the write
+transaction entirely
+([root_cause_worker.py](../src/graph/root_cause_worker.py)). A root cause is an
+enrichment, not a transactional invariant: nothing about durably recording an
+alert or delivering its notification depends on knowing what caused it.
+
+The larger win is **debouncing**. Five hundred alerts in a storm used to trigger
+five hundred rankings of a neighbourhood that barely changed between them. The
+observation round marks its scope dirty and the worker sweeps at most once per
+interval, so the same storm costs a handful of passes — the work per alert stops
+scaling with the alert rate at all. A test pins this: forty alerts collapse to
+**one** ranking pass, and a scope with no new evidence is not re-ranked.
+
+Nothing is lost to the delay, because delivery payloads render from live
+incident state at send time — the same property that lets a card recovered
+after an outage show the current alert count. A hint that lands after a card
+was queued still reaches it.
+
+Writing this surfaced a bug worth recording, because it is **gap 4 biting in a
+new place**. Dirtiness was first written as `ranked_at < last_observed_at` —
+but `last_observed_at` carries the *monitor's* clock while `ranked_at` is wall
+clock. Comparing the two means a source whose clock runs a few minutes behind
+leaves its scope permanently clean, and root cause silently stops updating
+forever. Dirtiness is now a **revision counter**, which has no clock to
+disagree with.
 
 ## 3. Correlation is temporal only, and will produce confident nonsense — FIXED
 
@@ -177,6 +198,14 @@ ever delayed.
 
 `last_gap = max(0.0, ...)` already quietly clamps negative gaps, which is the
 symptom showing through.
+
+**This gap has since bitten for real.** The background root-cause worker was
+first written to decide whether a scope needed re-ranking by comparing
+`ranked_at` (wall clock) against `last_observed_at` (the monitor's clock). A
+source running behind would have left its scope permanently clean and root
+cause would have stopped updating silently. It was caught by a test and the
+comparison replaced with a revision counter — but the same two clocks are still
+mixed in the quiet-deadline path described above, where nothing yet catches it.
 
 **Design.** Name the two clocks and keep them apart — this is the standard
 event-time/processing-time split:

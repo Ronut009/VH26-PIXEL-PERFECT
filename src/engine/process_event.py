@@ -18,7 +18,6 @@ from .db_adapter import IncidentRecord, lookup_incident, persist_decision
 from .dedupe import generate_fingerprint, is_exact_duplicate
 from .incident_machine import transition_state
 from src.graph.observe_incident import observe_incident
-from src.graph.root_cause_ranker import score_root_cause
 from src.graph.storm_grouping import (
     assign_group,
     redirect_member_deliveries,
@@ -330,25 +329,6 @@ async def process_event(
     )
 
 
-async def _describe_root_cause(
-    transaction_obj: aiosqlite.Connection, verdict
-) -> str:
-    """Render a verdict for a human, not for a log parser.
-
-    The hint is shown verbatim on the Slack card, and a bare UUID tells a
-    responder nothing at 3am. The incident's title is what they recognise; the
-    confidence is what lets them decide how much to trust it.
-    """
-
-    async with transaction_obj.execute(
-        "SELECT title FROM incidents WHERE incident_id = ?", (verdict.incident_id,)
-    ) as cursor:
-        row = await cursor.fetchone()
-
-    label = row["title"] if row and row["title"] else verdict.incident_id
-    return f"{label} (confidence {verdict.confidence:.0%})"
-
-
 async def persist_and_observe(
     transaction_obj: aiosqlite.Connection, decision: EngineDecision
 ) -> EngineDecision:
@@ -392,21 +372,14 @@ async def persist_and_observe(
     fingerprints = tuple(row["stable_fingerprint"] for row in rows)
     await observe_incident(transaction_obj, decision.incident_id, fingerprints)
 
-    # Rank within the same bounded neighbourhood. A global rank both cost
-    # O(edges) per alert and answered the wrong question - "the loudest thing
-    # anywhere" rather than "what led the incidents related to this one".
-    candidates = tuple(row["incident_id"] for row in rows)
-    verdict = await score_root_cause(transaction_obj, candidate_ids=candidates)
-    decision.root_cause_hint = (
-        await _describe_root_cause(transaction_obj, verdict)
-        if verdict is not None
-        else None
-    )
-    if decision.root_cause_hint is not None:
-        await transaction_obj.execute(
-            "UPDATE incidents SET root_cause_hint = ? WHERE incident_id = ?",
-            (decision.root_cause_hint, str(decision.incident_id)),
-        )
+    # Ranking deliberately does not happen here. A root cause is an enrichment,
+    # not a transactional invariant: nothing about durably recording this alert
+    # or delivering its notification depends on knowing what caused it. The
+    # observation round above marks the scope dirty and RootCauseWorker ranks it
+    # off the write path, debounced - so a storm of alerts costs a handful of
+    # ranking passes instead of one per alert. Delivery payloads render from
+    # live incident state at send time, so a hint that lands after a card was
+    # queued still reaches it.
 
     # Correlation stops at annotation unless something acts on it. If this
     # incident is now strongly tied to others, they become one storm and only

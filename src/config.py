@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     CORRELATION_WINDOW_MS: int = 900_000        # 15 min
     CORRELATION_MAX_NEIGHBOURS: int = 25
 
+    # Root cause is an enrichment, not a transactional invariant, so it is
+    # computed off the write path. The interval is also the debounce: a storm
+    # of alerts against one scope earns one ranking pass per tick rather than
+    # one per alert.
+    ROOT_CAUSE_SWEEP_INTERVAL_SECONDS: float = 2.0
+
     # Alert ingestion is a trust boundary: it is the endpoint that creates
     # incidents, and a forged `resolved` alert closes a real one. Enabled by
     # default, and with no tokens configured it refuses ingest rather than

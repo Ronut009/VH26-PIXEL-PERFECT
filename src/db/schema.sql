@@ -136,7 +136,17 @@ CREATE INDEX IF NOT EXISTS idx_graph_node_stats_scope
 CREATE TABLE IF NOT EXISTS graph_scope_stats (
     scope_key         TEXT PRIMARY KEY,
     rounds            REAL NOT NULL DEFAULT 0.0,   -- decayed observation rounds in scope
-    last_observed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    last_observed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    -- Dirtiness is tracked by revision, not by timestamp, on purpose.
+    -- last_observed_at carries the monitor's clock (event time) while any
+    -- "when did we last rank" stamp is wall clock, and comparing the two means
+    -- a source whose clock runs behind marks its scope permanently clean - root
+    -- cause would silently stop updating. A counter has no clock to disagree
+    -- with. The lag between the two *is* the debounce: a burst of alerts bumps
+    -- observed_revision many times and still earns one ranking pass.
+    observed_revision INTEGER NOT NULL DEFAULT 0,
+    ranked_revision   INTEGER NOT NULL DEFAULT 0,
+    ranked_at         TEXT                        -- for humans, never compared
 );
 
 -- ─────────────────────────────────────────────────────────────

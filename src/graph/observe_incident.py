@@ -121,13 +121,18 @@ async def _record_round(
             + 1.0
         )
 
+    # observed_revision is what marks the scope dirty for the background
+    # ranker. It is a counter rather than a timestamp so the decision never
+    # depends on two clocks agreeing.
     await tx.execute(
         """
-        INSERT INTO graph_scope_stats (scope_key, rounds, last_observed_at)
-        VALUES (?, ?, ?)
+        INSERT INTO graph_scope_stats (
+            scope_key, rounds, last_observed_at, observed_revision
+        ) VALUES (?, ?, ?, 1)
         ON CONFLICT(scope_key) DO UPDATE SET
             rounds = excluded.rounds,
-            last_observed_at = excluded.last_observed_at
+            last_observed_at = excluded.last_observed_at,
+            observed_revision = graph_scope_stats.observed_revision + 1
         """,
         (scope_key, rounds, observed_at),
     )

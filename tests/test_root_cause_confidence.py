@@ -178,6 +178,16 @@ async def test_the_stored_hint_names_the_incident_not_a_uuid(db_conn):
             db_conn, _event("LatencyHigh", base + timedelta(seconds=1))
         )
 
+    # Ranking is not part of the write transaction, so nothing is stored until
+    # the background pass runs. Drive one directly rather than sleeping.
+    from src.graph.root_cause_worker import rank_scope
+
+    await rank_scope(
+        db_conn,
+        "production/c1",
+        int((start + timedelta(seconds=60)).timestamp() * 1000),
+    )
+
     async with db_conn.execute(
         "SELECT root_cause_hint FROM incidents WHERE root_cause_hint IS NOT NULL LIMIT 1"
     ) as cursor:
