@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.config import settings  # noqa: E402
 from src.contracts import NormalizedEvent  # noqa: E402
-from src.db.hashchain import GENESIS_HASH, canonical_json, compute_row_hash  # noqa: E402
+from src.db.hashchain import GENESIS_HASH, compute_row_hash  # noqa: E402
 
 
 def _row_to_event(row: sqlite3.Row) -> NormalizedEvent:
@@ -27,6 +27,18 @@ def _row_to_event(row: sqlite3.Row) -> NormalizedEvent:
         fired_at=datetime.fromisoformat(row["fired_at"].replace("Z", "+00:00")),
         raw_payload=json.loads(row["raw_payload"]),
     )
+
+
+def _canonical_payload(row: sqlite3.Row) -> str:
+    # Mirrors src/engine/db_adapter.py::_canonical_payload — the row_hash covers
+    # both the normalized event and the engine's decision for that event.
+    event = _row_to_event(row)
+    decision_payload = json.loads(row["decision_payload_json"] or "{}")
+    payload = {
+        "event": event.model_dump(mode="json"),
+        "decision": decision_payload,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def main() -> None:
@@ -54,8 +66,7 @@ def main() -> None:
             print(f"  stored   prev_hash={row['prev_hash']}")
             raise SystemExit(1)
 
-        event = _row_to_event(row)
-        recomputed_hash = compute_row_hash(row["prev_hash"], canonical_json(event))
+        recomputed_hash = compute_row_hash(row["prev_hash"], _canonical_payload(row))
 
         if recomputed_hash != row["row_hash"]:
             print(f"CHAIN TAMPERED at seq={row['seq']} (event_id={row['event_id']}):")
