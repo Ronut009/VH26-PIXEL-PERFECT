@@ -10,7 +10,7 @@ Nothing is faked. Every number it prints came back out of the pipeline.
 
     .venv/Scripts/python.exe scripts/demo.py
     .venv/Scripts/python.exe scripts/demo.py --skip-seed     # verify only
-    .venv/Scripts/python.exe scripts/demo.py --reset         # clean numbers (backend must be stopped)
+    .venv/Scripts/python.exe scripts/demo.py --reset         # clear first, then one clean run
 """
 
 from __future__ import annotations
@@ -580,22 +580,9 @@ async def github_phase(
 # ────────────────────────────────────────────────────────────────── reset ──
 
 def reset_pipeline_data(backend_reachable: bool) -> bool:
-    """Clear the pipeline tables. Returns False when it refused to."""
+    """Clear the pipeline tables. Safe to run with the backend up."""
 
     head("0. Reset")
-    if backend_reachable:
-        line(
-            BAD,
-            "Refusing to reset while the backend is running",
-            "The engine holds in-memory quiet-deadline timers for live incidents.\n"
-            "\n"
-            "  1) Stop the backend (close its window, or Ctrl+C in it)\n"
-            "  2) .venv/Scripts/python.exe scripts/demo.py --reset\n"
-            "  3) Start it again:\n"
-            "     .venv/Scripts/python.exe -m uvicorn src.main:app --host 127.0.0.1 --port 8000\n"
-            "  4) .venv/Scripts/python.exe scripts/demo.py",
-        )
-        return False
 
     from src.config import settings  # imported here so --reset works without a live app
 
@@ -603,15 +590,40 @@ def reset_pipeline_data(backend_reachable: bool) -> bool:
     if not database.exists():
         line(OK, "No database to reset")
         return True
-    connection = sqlite3.connect(database)
+
+    # Running against a live backend is fine. The engine keeps quiet-deadline
+    # timers in memory, but when one fires for an incident that no longer
+    # exists, TimerWorker._persist_trigger gets None back from
+    # _deadline_decision and commits nothing -- a stale timer is a no-op.
+    # The only real hazard is the writer lock, so wait for it rather than
+    # failing the moment the backend is mid-transaction.
+    connection = sqlite3.connect(database, timeout=15.0)
     try:
+        connection.execute("PRAGMA busy_timeout = 15000")
         for table in ("outbox", "delivery_intents", "edges", "raw_events", "incidents"):
             connection.execute(f"DELETE FROM {table}")
         connection.commit()
-        line(OK, "Cleared incidents, raw events, edges and delivery rows")
-        line(INFO, "GitHub installations, mappings and snapshots were left alone")
+    except sqlite3.OperationalError as exc:
+        line(
+            BAD,
+            "Could not clear the database",
+            f"{exc}\nThe backend held the writer lock for longer than 15s. Try again,\n"
+            "or stop the backend first.",
+        )
+        problems.append("Reset")
+        return False
     finally:
         connection.close()
+
+    line(OK, "Cleared incidents, raw events, edges and delivery rows")
+    line(INFO, "GitHub installations, mappings and snapshots were left alone")
+    if backend_reachable:
+        line(
+            INFO,
+            "Backend is live -- refresh the dashboard tab to clear what it already holds",
+            "The browser keeps the incidents it has already streamed, so it will\n"
+            "still show the old rows until the page is reloaded.",
+        )
     return True
 
 
@@ -672,7 +684,7 @@ async def run(args: argparse.Namespace) -> int:
         cut = round((alerts_in - len(incidents)) / alerts_in * 100, 1) if alerts_in else 0.0
         print(
             f"""
-Open {dashboard}
+Open {dashboard}   (refresh the tab if it was already open)
 
 1. Overview      "{alerts_in} alerts came in. {len(incidents)} incidents came out."
                  The consolidation tile reads {cut}%. Every figure is derived from

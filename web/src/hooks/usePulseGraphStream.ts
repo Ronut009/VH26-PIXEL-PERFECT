@@ -55,6 +55,36 @@ export function usePulseGraphStream() {
     });
   }, []);
 
+  /**
+   * A snapshot is the authoritative current state, so it replaces the maps
+   * rather than merging into them. Merging meant an incident that had been
+   * deleted, or had aged past the snapshot's row limit, stayed on screen for
+   * the life of the tab -- the counts only ever grew.
+   */
+  const replaceIncidents = useCallback((rows: Record<string, unknown>[]) => {
+    setIncidents(() => {
+      const next = new Map<string, Incident>();
+      for (const row of rows) {
+        const incident = normalizeIncident(row);
+        if (incident.incident_id) next.set(incident.incident_id, incident);
+      }
+      return next;
+    });
+  }, []);
+
+  const replaceEdges = useCallback((rows: Record<string, unknown>[]) => {
+    setEdges(() => {
+      const next = new Map<string, IncidentEdge>();
+      for (const row of rows) {
+        const edge = normalizeEdge(row);
+        if (edge.src_incident_id && edge.dst_incident_id) {
+          next.set(`${edge.src_incident_id}->${edge.dst_incident_id}`, edge);
+        }
+      }
+      return next;
+    });
+  }, []);
+
   const mergeEdges = useCallback((rows: Record<string, unknown>[]) => {
     if (rows.length === 0) return;
     setEdges((prev) => {
@@ -142,8 +172,8 @@ export function usePulseGraphStream() {
       source.addEventListener("snapshot", (event) => {
         const data = parse(event as MessageEvent) as SnapshotPayload | null;
         if (!data) return;
-        mergeIncidents(data.incidents ?? []);
-        mergeEdges(data.edges ?? []);
+        replaceIncidents(data.incidents ?? []);
+        replaceEdges(data.edges ?? []);
         touch(data.streamId);
       });
 
@@ -184,7 +214,7 @@ export function usePulseGraphStream() {
       if (source) source.close();
       if (pollTimer) clearInterval(pollTimer);
     };
-  }, [mergeIncidents, mergeEdges, pollOnce]);
+  }, [mergeIncidents, mergeEdges, replaceIncidents, replaceEdges, pollOnce]);
 
   return {
     incidents: Array.from(incidents.values()),
