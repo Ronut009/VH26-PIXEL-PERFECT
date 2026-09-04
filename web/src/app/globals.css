@@ -1,81 +1,47 @@
 @import "tailwindcss";
 
 /*
-  Design tokens for the incident console.
-  One spacing unit = 4px, used consistently as 1/2/3/4/6/8/12 (Tailwind's
-  default scale) — no ad hoc px values in components.
-  Color is functional: severity/status drive it, nothing is colored for
-  decoration. Console is high-contrast dark by default (this is an
-  always-on-a-second-monitor tool, not a marketing page).
+  PulseGraph light operational theme.
+  Predominantly white and neutral. Colour is reserved for severity, system
+  state, correlation and live activity. No gradients, no glow, no glass.
 */
-:root {
-  --bg: #0b0d10;
-  --bg-raised: #15181d;
-  --bg-inset: #0d0f12;
-  --hairline: rgba(255, 255, 255, 0.1);
-  --hairline-strong: rgba(255, 255, 255, 0.2);
-  --text: #edf1f4;
-  --text-dim: #98a3ad;
-  --text-faint: #5c6670;
+@theme {
+  --color-app: #f7f9fc;
+  --color-panel: #ffffff;
+  --color-panel-2: #f8fafc;
+  --color-edge: #e5eaf0;
 
-  --live: #35d68a;
-  --warn: #e8b23d;
-  --down: #ef5a5a;
+  --color-text: #172033;
+  --color-text-2: #64748b;
+  --color-text-3: #94a3b8;
 
-  --sev-critical: #ef5a5a;
-  --sev-high: #e8823d;
-  --sev-medium: #e8c53d;
-  --sev-low: #4f8ef7;
+  --color-brand: #2563eb;
+  --color-brand-soft: #eff4ff;
+  --color-cyan: #06b6d4;
+  --color-ok: #16a34a;
+  --color-warn: #f59e0b;
+  --color-crit: #ef4444;
 
-  --route-suppressed: #5c6670;
+  --font-sans: var(--font-inter), system-ui, sans-serif;
+  --font-mono: var(--font-mono-data), ui-monospace, monospace;
 }
 
-@theme inline {
-  --color-bg: var(--bg);
-  --color-bg-raised: var(--bg-raised);
-  --color-bg-inset: var(--bg-inset);
-  --color-hairline: var(--hairline);
-  --color-text: var(--text);
-  --color-text-dim: var(--text-dim);
-  --color-text-faint: var(--text-faint);
-  --font-ui: var(--font-ui);
-  --font-data: var(--font-data);
-}
-
-html {
-  color-scheme: dark;
-}
+html { color-scheme: light; }
 
 body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-ui), system-ui, sans-serif;
+  background: var(--color-app);
+  color: var(--color-text);
+  font-family: var(--font-sans);
   font-size: 14px;
-  position: relative;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
-/*
-  Grain, not gradient: a static film-grain layer instead of a flat color
-  fade to give the black console some tooth. Fixed + pointer-events:none
-  so it never intercepts clicks or scrolls with the page.
-*/
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 999;
-  pointer-events: none;
-  opacity: 0.05;
-  mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-}
+@keyframes live-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+.live-pulse { animation: live-pulse 2s ease-in-out infinite; }
 
-::selection {
-  background: var(--sev-low);
-  color: #08090b;
-}
+:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 2px; }
 
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--hairline-strong) transparent;
-}
+* { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+
+@media (prefers-reduced-motion: reduce) { .live-pulse { animation: none; } }
