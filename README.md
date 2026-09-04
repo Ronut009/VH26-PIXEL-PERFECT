@@ -116,6 +116,10 @@ a critical payment failure that immediately bypasses aggregation.
 | `INGEST_TOKENS` | `name:token[:scope]`, comma-separated. Scope is a prefix over `environment/cluster`, so a staging token cannot write production |
 | `HEARTBEAT_URL` | External watchdog to ping (PagerDuty heartbeat, healthchecks.io). **Unset means nothing notices if this process dies.** The ping stops when delivery is broken, so absence pages |
 | `HEARTBEAT_INTERVAL_SECONDS` | How often to report in (default `60`) |
+| `FLAP_DAMPING_ENABLED` | Collapse repeated close/reopen cycles into a periodic update (default `true`) |
+| `FLAP_REOPEN_THRESHOLD` | Reopens before an incident counts as flapping (default `3`) |
+| `FLAP_DIGEST_INTERVAL_SECONDS` | Minimum gap between card updates while flapping (default `1800`) |
+| `FLAP_HYSTERESIS_FACTOR` | Multiplies the silence threshold per reopen, so closing gets harder each cycle (default `1.5`) |
 | `SELFCHECK_STUCK_OUTBOX_SECONDS` | Undelivered age at which delivery counts as stalled (default `900`) |
 | `SELFCHECK_DEAD_LETTER_LIMIT` | Dead letters tolerated before reporting degraded (default `10`) |
 | `CLOCK_SKEW_WARN_MS` | Source clock offset that earns a warning (default `120000`); drift distorts every elapsed-time judgement about that source |

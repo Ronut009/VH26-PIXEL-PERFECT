@@ -113,7 +113,8 @@ async def hydrate_payload(
         """
         SELECT title, summary, severity, status, alert_count,
                root_cause_hint, first_alert_at, last_alert_at, updated_at,
-               acknowledged_by, acknowledged_via, resolved_via, resolution_source
+               acknowledged_by, acknowledged_via, resolved_via, resolution_source,
+               COALESCE(reopen_count, 0) AS reopen_count, flapping_since
         FROM incidents WHERE incident_id = ?
         """,
         (incident_id,),
@@ -144,6 +145,13 @@ async def hydrate_payload(
         hydrated["via"] = row["resolved_via"] or row["acknowledged_via"]
     if row["resolution_source"]:
         hydrated["resolution_source"] = row["resolution_source"]
+
+    # A repeatedly reopened incident is a finding about the alert rule, not
+    # just about the service. Carried onto the card because this system is the
+    # only thing in the stack positioned to notice it.
+    if row["flapping_since"]:
+        hydrated["flapping"] = True
+        hydrated["reopen_count"] = int(row["reopen_count"])
 
     # If this incident anchors a correlated storm, the card is the storm's, not
     # its own. Attaching the snapshot here means the group is rendered from

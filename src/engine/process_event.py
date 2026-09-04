@@ -169,6 +169,8 @@ def _decision(
     is_critical_bypass: bool = False,
     bypass_reason: str | None = None,
     delivery_intents: list[DeliveryIntent] | None = None,
+    reopen_count: int = 0,
+    is_flapping: bool = False,
 ) -> EngineDecision:
     return EngineDecision(
         event=event,
@@ -196,6 +198,8 @@ def _decision(
             bypass_reason=bypass_reason,
         ),
         delivery_intents=delivery_intents or [],
+        reopen_count=reopen_count,
+        is_flapping=is_flapping,
     )
 
 
@@ -322,6 +326,26 @@ async def process_event(
         quiet["quiet_at_ms"], record.first_ingested_ms, ingest_now_ms
     )
     incident_id = str(record.incident_id)
+
+    # A reopen is a RESOLVED incident firing again. Counting them is what
+    # separates "this came back" from "this alert is broken": the sweeper
+    # closes a quiet incident and the engine reopens it on the next alert, and
+    # a badly thresholded signal cycles between the two forever.
+    reopened = record.state == "RESOLVED" and normalized_event.status != "resolved"
+    reopen_count = record.reopen_count + (1 if reopened else 0)
+    is_flapping = (
+        settings.FLAP_DAMPING_ENABLED
+        and reopen_count >= settings.FLAP_REOPEN_THRESHOLD
+    )
+
+    # While flapping, collapse the repeats into a periodic update. The early
+    # transitions still notify - they are genuinely new information - and the
+    # incident keeps being recorded either way; only the card stops repeating.
+    notify = True
+    if is_flapping:
+        since_notified = ingest_now_ms - record.last_flap_notified_ms
+        notify = since_notified >= settings.FLAP_DIGEST_INTERVAL_SECONDS * 1000
+
     payload = {
         "incident_id": incident_id,
         "state": state,
@@ -331,6 +355,10 @@ async def process_event(
     changes = ["DUPLICATE_COALESCED", "QUIET_DEADLINE_UPDATED"]
     if state != record.state:
         changes.append(f"STATE_{record.state}_TO_{state}")
+    if reopened:
+        changes.append("REOPENED")
+    if is_flapping:
+        changes.append("FLAPPING")
     return _decision(
         event=normalized_event,
         incident_id=incident_id,
@@ -344,7 +372,13 @@ async def process_event(
         gap_history=[*record.gap_history, last_gap],
         card_changes=changes,
         alert_count=record.alert_count + 1,
-        delivery_intents=[_slack_intent(normalized_event, incident_id, "update", payload)],
+        reopen_count=reopen_count,
+        is_flapping=is_flapping,
+        delivery_intents=(
+            [_slack_intent(normalized_event, incident_id, "update", payload)]
+            if notify
+            else []
+        ),
     )
 
 

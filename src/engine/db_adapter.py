@@ -31,6 +31,10 @@ class IncidentRecord:
     # whose clock drifts must not be able to move a deadline we own.
     first_ingested_ms: int = 0
     last_ingested_ms: int = 0
+    # How many times this incident has closed and come back, and when it last
+    # earned a card update while flapping.
+    reopen_count: int = 0
+    last_flap_notified_ms: int = 0
 
 
 def _iso(value: datetime) -> str:
@@ -68,6 +72,8 @@ async def lookup_incident(
             i.first_alert_at,
             i.first_ingested_at,
             i.last_ingested_at,
+            i.reopen_count,
+            i.last_flap_notified_at,
             i.gap_history_json,
             i.alert_count,
             r.service,
@@ -123,6 +129,10 @@ async def lookup_incident(
         # scheduling everything at the epoch.
         first_ingested_ms=_epoch_ms(row["first_ingested_at"] or row["first_alert_at"]),
         last_ingested_ms=_epoch_ms(row["last_ingested_at"] or row["last_alert_at"]),
+        reopen_count=int(row["reopen_count"] or 0),
+        last_flap_notified_ms=(
+            _epoch_ms(row["last_flap_notified_at"]) if row["last_flap_notified_at"] else 0
+        ),
     )
 
 
@@ -139,10 +149,10 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
         INSERT INTO incidents (
             incident_id, scope_key, stable_fingerprint, title, summary, severity,
             status, alert_count, first_alert_at, last_alert_at,
-            first_ingested_at, last_ingested_at, ewma_rate,
+            first_ingested_at, last_ingested_at, reopen_count, ewma_rate,
             quiet_at_ms, ewma_mean_gap, ewma_variance, gap_history_json,
             route_decision, root_cause_hint, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(incident_id) DO UPDATE SET
             title = excluded.title,
             summary = COALESCE(excluded.summary, incidents.summary),
@@ -151,6 +161,7 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
             alert_count = excluded.alert_count,
             last_alert_at = excluded.last_alert_at,
             last_ingested_at = excluded.last_ingested_at,
+            reopen_count = excluded.reopen_count,
             ewma_rate = excluded.ewma_rate,
             quiet_at_ms = excluded.quiet_at_ms,
             ewma_mean_gap = excluded.ewma_mean_gap,
@@ -173,6 +184,7 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
             event_time,
             now,
             now,
+            decision.reopen_count,
             decision.ewma_mean_gap,
             decision.quiet_at_ms,
             decision.ewma_mean_gap,
@@ -184,6 +196,25 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
             now,
         ),
     )
+
+    # Flap bookkeeping is a separate statement because both stamps are
+    # write-once-ish: flapping_since marks when the pattern was first
+    # recognised and must not slide forward, and the notified stamp only moves
+    # when this decision actually earned a card.
+    if decision.is_flapping:
+        await tx.execute(
+            """
+            UPDATE incidents
+            SET flapping_since = COALESCE(flapping_since, ?)
+            WHERE incident_id = ?
+            """,
+            (now, str(decision.incident_id)),
+        )
+    if decision.is_flapping and decision.delivery_intents:
+        await tx.execute(
+            "UPDATE incidents SET last_flap_notified_at = ? WHERE incident_id = ?",
+            (now, str(decision.incident_id)),
+        )
 
     # The gap between the two clocks is itself a signal. Recorded here, where
     # both are in hand, so a drifted exporter reports itself instead of quietly

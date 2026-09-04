@@ -4,8 +4,8 @@ A pass over PulseGraph looking for what an experienced reviewer would attack
 next, now that the delivery and reconciliation planes are closed. Each entry
 states the gap, the concrete failure it produces, and the design that fixes it.
 
-Ordered by what gets asked first, not by effort. Gaps 1-4 and 6 are now
-fixed; the rest stand.
+Ordered by what gets asked first, not by effort. Gaps 1-4, 6 and 11 are
+now fixed; the rest stand.
 
 ---
 
@@ -399,7 +399,7 @@ after N minutes, escalate to the next channel in the failover chain — the
 mechanism already exists, it just needs a timer as a trigger instead of an
 outage. The timer wheel already does durable, restart-surviving deadlines.
 
-## 11. Flapping will now produce churn
+## 11. Flapping will now produce churn — FIXED
 
 The silence sweeper closes quiet incidents, and `_next_state` reopens a
 `RESOLVED` incident on the next alert. A service flapping on a cycle longer
@@ -407,16 +407,34 @@ than its silence threshold will resolve and reopen indefinitely, and each
 transition posts a card update. Two correct features compose into a noise
 generator.
 
-**Design.** Damping, with hysteresis:
+**Measured before fixing:** ten close/reopen cycles produced **21 card
+updates** for a single incident — the system built to stop alert fatigue
+generating it.
 
-- Track reopen count per fingerprint over a window; after k reopens, mark the
-  incident *flapping* and switch to a periodic digest instead of per-transition
-  updates.
-- Require a longer quiet period to close an incident that has already reopened
-  once — closing should get harder each time, not stay equally easy.
-- Flapping is itself a finding worth surfacing: it usually means the alert
-  threshold is wrong, which is an alert-quality problem the system is uniquely
-  placed to report.
+**Fixed** with damping and hysteresis:
+
+- **Reopens are counted.** `incidents.reopen_count` separates "this resolved
+  and came back" from "this alert is broken". Past
+  `FLAP_REOPEN_THRESHOLD` the incident is marked flapping.
+- **The repeats collapse, the news does not.** While flapping, at most one card
+  update per `FLAP_DIGEST_INTERVAL_SECONDS`. The early transitions still
+  notify, because a first close and a first reopen are genuinely new
+  information; only the repetition is suppressed. The incident keeps being
+  recorded either way — damping changes what is *said*, never what is *known*.
+- **Closing gets harder each time.** The silence threshold is multiplied by
+  `FLAP_HYSTERESIS_FACTOR ** reopens`, capped so a long-running flapper widens
+  toward the ceiling rather than past it. Closing on the same evidence that
+  closed it last time guarantees the next reopen.
+- **The flapping is the finding.** The card says so, names the reopen count,
+  and says plainly that repeated cycling usually means the alert threshold is
+  wrong rather than the service being unhealthy. That is an alert-quality
+  problem, and this system is the only thing in the stack positioned to notice
+  it.
+
+After: 21 transitions produce a handful of cards, and — the property that
+actually matters — twenty *more* transitions add **zero**. A service can flap
+for hours; the notification cost stops growing with it. `FLAP_DAMPING_ENABLED`
+turns it off for an operator who wants every transition.
 
 ## 12. Nothing is ever deleted
 

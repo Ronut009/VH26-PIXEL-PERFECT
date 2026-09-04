@@ -76,6 +76,10 @@ class EngineDecision(BaseModel):
     bypass_reason: str | None = None
     decision_payload_json: str = "{}"
     delivery_intents: list[DeliveryIntent] = Field(default_factory=list)
+    # Flap damping: how many times this incident has closed and come back, and
+    # whether that is now a pattern rather than a one-off recurrence.
+    reopen_count: int = 0
+    is_flapping: bool = False
     root_cause_hint: str | None = None
 
 

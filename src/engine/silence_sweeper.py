@@ -72,6 +72,9 @@ def silence_threshold_ms(
     critical_multiplier: float,
     floor_ms: int,
     ceiling_ms: int,
+    reopen_count: int = 0,
+    hysteresis_factor: float = 1.0,
+    hysteresis_max_reopens: int = 6,
 ) -> int:
     """How long this specific incident may be silent before it is presumed over.
 
@@ -97,7 +100,15 @@ def silence_threshold_ms(
     severity_factor = (
         (critical_multiplier / multiplier) if severity == "critical" else 1.0
     )
-    return int(min(base * severity_factor, float(ceiling_ms)))
+
+    # Hysteresis. Closing an incident on the same evidence that closed it last
+    # time guarantees the next reopen, so each cycle makes closing harder. The
+    # exponent is capped so a long-running flapper widens toward the ceiling
+    # rather than overflowing past it.
+    reopens = max(0, min(reopen_count, hysteresis_max_reopens))
+    flap_factor = max(1.0, hysteresis_factor) ** reopens
+
+    return int(min(base * severity_factor * flap_factor, float(ceiling_ms)))
 
 
 class SilenceSweeper:
@@ -154,6 +165,7 @@ class SilenceSweeper:
         async with tx.execute(
             f"""
             SELECT incident_id, severity, ewma_mean_gap, ewma_variance,
+                   COALESCE(reopen_count, 0) AS reopen_count,
                    COALESCE(last_ingested_at, last_alert_at) AS last_seen_at
             FROM incidents
             WHERE status IN ({placeholders})
@@ -172,6 +184,9 @@ class SilenceSweeper:
                 critical_multiplier=settings.SILENCE_RESOLVE_CRITICAL_MULTIPLIER,
                 floor_ms=settings.SILENCE_RESOLVE_MIN_MS,
                 ceiling_ms=settings.SILENCE_RESOLVE_MAX_MS,
+                reopen_count=int(row["reopen_count"]),
+                hysteresis_factor=settings.FLAP_HYSTERESIS_FACTOR,
+                hysteresis_max_reopens=settings.FLAP_HYSTERESIS_MAX_REOPENS,
             )
             # Silence is measured against *our* clock, not the monitor's.
             # Measured as `now - fired_at`, a source whose clock runs twenty

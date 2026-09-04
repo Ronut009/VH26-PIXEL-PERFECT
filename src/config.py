@@ -1,5 +1,21 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Substrings that mark a setting as secret. Matched on the field name so a
+# newly added credential is redacted by default rather than by remembering to
+# add it here.
+_SENSITIVE_NAME_HINTS = ("TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL")
+
+# Names that carry a secret without saying so. A heartbeat URL is a capability:
+# anyone holding it can fake the all-clear for the dead man's switch.
+_SENSITIVE_NAMES = frozenset({"HEARTBEAT_URL"})
+
+
+def _is_sensitive(field_name: str) -> bool:
+    upper = field_name.upper()
+    return upper in _SENSITIVE_NAMES or any(
+        hint in upper for hint in _SENSITIVE_NAME_HINTS
+    )
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -113,6 +129,22 @@ class Settings(BaseSettings):
     SILENCE_RESOLVE_MAX_MS: int = 21_600_000    # 6 h ceiling
     SILENCE_SWEEP_INTERVAL_SECONDS: float = 30.0
 
+    # Flap damping. Closing a quiet incident and reopening it on the next alert
+    # are both correct; composed, they turn a badly thresholded alert into a
+    # stream of card updates from the system built to stop exactly that.
+    # Damping collapses the repeats without hiding the first transitions, which
+    # are genuinely new information.
+    FLAP_DAMPING_ENABLED: bool = True
+    # Reopens before an incident is treated as flapping rather than as one that
+    # legitimately came back. Two is a coincidence; this is the pattern.
+    FLAP_REOPEN_THRESHOLD: int = 3
+    # While flapping, at most one card update per this interval.
+    FLAP_DIGEST_INTERVAL_SECONDS: float = 1_800.0
+    # Each reopen multiplies the silence threshold, so closing gets harder every
+    # time rather than staying equally easy and guaranteeing the next reopen.
+    FLAP_HYSTERESIS_FACTOR: float = 1.5
+    FLAP_HYSTERESIS_MAX_REOPENS: int = 6
+
     # GitHub Phase 1 uses a GitHub App with Metadata: read and Contents: read
     # only. The private key and webhook secret belong in a secret manager in
     # production; escaped newlines (\\n) are supported for local .env files.
@@ -165,6 +197,25 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-opus-5"
     ANTHROPIC_MAX_OUTPUT_TOKENS: int = 16_000
     ANTHROPIC_TIMEOUT_SECONDS: float = 60.0
+
+    def __repr_args__(self):
+        """Redact credentials from every repr of this object.
+
+        Pydantic renders the whole settings object in a repr, and a repr is
+        exactly what ends up in a pytest traceback, an unhandled-exception log
+        line, or a debugger frame. A single unrelated test failure was enough
+        to print the live Slack bot token, PagerDuty routing key and GitHub
+        admin token in full - which then travels wherever that output goes: CI
+        logs, a pasted stack trace, a screenshot in a chat.
+
+        Values stay usable; only their presentation changes.
+        """
+
+        for name, value in super().__repr_args__():
+            if name and value and _is_sensitive(name):
+                yield name, "***redacted***"
+            else:
+                yield name, value
 
     @property
     def github_app_is_configured(self) -> bool:

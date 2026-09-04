@@ -86,6 +86,15 @@ CREATE TABLE IF NOT EXISTS incidents (
     -- Set when the correlation graph has tied this incident to others in the
     -- same cascade. Members other than the anchor stop posting their own card.
     correlation_group_id TEXT,
+    -- Flap damping. The silence sweeper closes a quiet incident and the engine
+    -- reopens it on the next alert; both are right, and together a badly
+    -- thresholded alert cycles forever, posting a card update every time. The
+    -- count is what separates "this resolved and came back" from "this alert
+    -- is broken", and the last-notified stamp is what collapses the repeats
+    -- into a periodic digest instead of a per-transition stream.
+    reopen_count          INTEGER NOT NULL DEFAULT 0,
+    flapping_since        TEXT,
+    last_flap_notified_at TEXT,
     acknowledged_at   TEXT,
     acknowledged_by   TEXT,                     -- provider user id/name
     acknowledged_via  TEXT,                     -- slack | pagerduty | dashboard

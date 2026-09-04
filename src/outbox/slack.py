@@ -179,6 +179,23 @@ def _build_blocks(payload: dict, resolved: bool = False) -> list[dict]:
         },
     ]
 
+    if payload.get("flapping"):
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"🔁 *Flapping* — resolved and reopened "
+                        f"*{payload.get('reopen_count', 0)}* times. Updates are "
+                        "throttled while this continues. Repeated cycling "
+                        "usually means the alert threshold is wrong rather "
+                        "than the service being unhealthy."
+                    ),
+                },
+            }
+        )
+
     root_cause = payload.get("root_cause_hint")
     if root_cause:
         blocks.insert(
