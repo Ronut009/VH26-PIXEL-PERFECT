@@ -150,7 +150,7 @@ export function IncidentDrawer({
       <div
         aria-hidden
         onClick={onClose}
-        className="fixed inset-0 z-40 bg-[#0F172A]/40 lg:hidden"
+        className="fixed inset-0 z-40 bg-[#050605]/75 lg:hidden"
       />
 
       <aside
@@ -252,7 +252,7 @@ export function IncidentDrawer({
             }}
             className={`w-full rounded-md px-3 py-2 text-[13px] font-medium transition-colors ${
               investigation.enabled
-                ? "bg-brand text-white hover:bg-[#1D4ED8]"
+                ? "bg-brand text-[#10120F] hover:bg-[#D8FF66]"
                 : "cursor-not-allowed border border-edge bg-panel-2 text-text-3"
             }`}
           >

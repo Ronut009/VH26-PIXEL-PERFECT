@@ -104,20 +104,17 @@ export function usePulseGraphStream() {
   // REST fallback, used only when the stream cannot be established.
   const pollOnce = useCallback(async () => {
     try {
-      const batch = await fetchIncidentsSince(restCursorRef.current);
+      // Polling is the authoritative fallback when SSE is unavailable. Read a
+      // complete snapshot rather than only a delta: a server-side cleanup or
+      // resolved/removed incident must disappear from an already-open tab.
+      const batch = await fetchIncidentsSince();
       if (!mountedRef.current) return;
       for (const incident of batch) {
         if (!restCursorRef.current || incident.updated_at > restCursorRef.current) {
           restCursorRef.current = incident.updated_at;
         }
       }
-      if (batch.length > 0) {
-        setIncidents((prev) => {
-          const next = new Map(prev);
-          batch.forEach((incident) => next.set(incident.incident_id, incident));
-          return next;
-        });
-      }
+      replaceIncidents(batch);
       setState("polling");
       setLastUpdated(new Date());
       setLoading(false);
@@ -137,7 +134,7 @@ export function usePulseGraphStream() {
       setState("offline");
       setLoading(false);
     }
-  }, [router]);
+  }, [replaceIncidents, router]);
 
   useEffect(() => {
     mountedRef.current = true;

@@ -663,7 +663,9 @@ class GitHubReadOnlyClient:
                 raise GitHubConfigurationError("GitHub App private key must not be empty")
             return private_key_pem
         if isinstance(private_key_pem, str) and private_key_pem.strip():
-            return private_key_pem
+            # .env files commonly store PEM line breaks as literal "\\n".
+            # PyJWT requires actual line-feed characters when parsing the key.
+            return private_key_pem.replace("\\n", "\n")
         raise GitHubConfigurationError("GitHub App private key must be PEM text or bytes")
 
     @staticmethod

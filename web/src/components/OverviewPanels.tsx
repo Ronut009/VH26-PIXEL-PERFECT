@@ -117,10 +117,10 @@ export function AlertVolumeChart({ incidents }: { incidents: Incident[] }) {
               x2={w - pad.right}
               y1={y(t)}
               y2={y(t)}
-              stroke="#E5EAF0"
+              stroke="#394135"
               strokeWidth="1"
             />
-            <text x={4} y={y(t) + 3} fontSize="10" fill="#94A3B8">
+            <text x={4} y={y(t) + 3} fontSize="10" fill="#7F8A77">
               {t}
             </text>
           </g>
@@ -134,7 +134,7 @@ export function AlertVolumeChart({ incidents }: { incidents: Incident[] }) {
             width={barW}
             height={Math.max(1, pad.top + plotH - y(s.ingested))}
             rx="2"
-            fill="#2563EB"
+            fill="#5DE4FF"
             opacity={0.85}
           >
             <title>{`${s.ingested} alerts ingested, consolidated into ${s.consolidated}`}</title>
@@ -144,12 +144,12 @@ export function AlertVolumeChart({ incidents }: { incidents: Incident[] }) {
         <path
           d={consolidatedLine}
           fill="none"
-          stroke="#16A34A"
+          stroke="#C8FF3D"
           strokeWidth="1.75"
           strokeLinejoin="round"
         />
         {series.map((s, i) => (
-          <circle key={`c${i}`} cx={cx(i)} cy={y(s.consolidated)} r="2.5" fill="#16A34A" />
+          <circle key={`c${i}`} cx={cx(i)} cy={y(s.consolidated)} r="2.5" fill="#C8FF3D" />
         ))}
       </svg>
     </div>

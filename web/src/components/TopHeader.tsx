@@ -46,7 +46,7 @@ export function TopHeader({
             className={`size-1.5 rounded-full ${connected ? "bg-ok live-pulse" : "bg-crit"}`}
             aria-hidden
           />
-          <span className={connected ? "text-[#15803D]" : "text-[#B91C1C]"}>
+          <span className={connected ? "text-ok" : "text-crit"}>
             {connected ? "Live" : "Offline"}
           </span>
         </span>
@@ -91,7 +91,7 @@ export function TopHeader({
             />
           ) : (
             <span
-              className="grid size-7 place-items-center rounded-full bg-brand text-[11px] font-medium text-white"
+              className="grid size-7 place-items-center rounded-full bg-brand text-[11px] font-semibold text-[#10120F]"
               aria-hidden
             >
               {(user.login || "?").slice(0, 2).toUpperCase()}

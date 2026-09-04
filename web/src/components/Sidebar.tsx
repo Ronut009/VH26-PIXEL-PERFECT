@@ -115,7 +115,7 @@ export function Sidebar({
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
           <path
             d="M1 10h3.2l2-5.2 3 11L12 8.2l1.4 1.8H19"
-            stroke="#2563EB"
+            stroke="#C8FF3D"
             strokeWidth="1.6"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -156,7 +156,7 @@ export function Sidebar({
               const ok = health[row.key] ?? null;
               const dot = ok === null ? "bg-text-3" : ok ? "bg-ok" : "bg-crit";
               const tone =
-                ok === null ? "text-text-3" : ok ? "text-[#15803D]" : "text-[#B91C1C]";
+                ok === null ? "text-text-3" : ok ? "text-ok" : "text-crit";
               return (
                 <li key={row.key} className="flex items-center justify-between text-[12px]">
                   <span className="text-text-2">{row.label}</span>
@@ -180,7 +180,7 @@ export function Sidebar({
             />
             Live
           </span>
-          <span className={connected ? "text-[#15803D]" : "text-text-3"}>
+          <span className={connected ? "text-ok" : "text-text-3"}>
             {connected ? "Connected" : "Offline"}
           </span>
         </div>

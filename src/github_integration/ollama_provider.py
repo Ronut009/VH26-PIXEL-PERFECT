@@ -252,6 +252,9 @@ class OllamaLocalProvider:
                 "start_line and end_line verbatim from the excerpt it cites; all four are "
                 "required. Evidence with kind 'incident' must omit all four.",
                 "Propose only human-reviewed changes; do not claim a change was applied.",
+                "When the proposed fix edits source, affected_paths must list every exact "
+                "repository path to be changed, and each path must also be cited by a "
+                "source_excerpt evidence item.",
                 "Do not request tools, git operations, network access, or additional source.",
             ],
             "incident": request.incident.model_dump(mode="json"),

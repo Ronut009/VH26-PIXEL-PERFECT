@@ -12,29 +12,29 @@ export const SEVERITY: Record<
 > = {
   critical: {
     label: "Critical",
-    badge: "bg-[#FEF2F2] text-[#B91C1C]",
-    dot: "bg-[#EF4444]",
+    badge: "bg-[#3A1915] text-[#FF9D93]",
+    dot: "bg-[#FF6B5E]",
     rank: 0,
     meaning: "Bypasses aggregation and pages on-call immediately",
   },
   high: {
     label: "High",
-    badge: "bg-[#FFFBEB] text-[#B45309]",
-    dot: "bg-[#F59E0B]",
+    badge: "bg-[#38270E] text-[#FFC66E]",
+    dot: "bg-[#FFB54A]",
     rank: 1,
     meaning: "Needs an engineer today",
   },
   medium: {
     label: "Medium",
-    badge: "bg-[#EFF4FF] text-[#1D4ED8]",
-    dot: "bg-[#2563EB]",
+    badge: "bg-[#113447] text-[#7BE5FF]",
+    dot: "bg-[#5DE4FF]",
     rank: 2,
     meaning: "Worth reviewing, not urgent",
   },
   low: {
     label: "Low",
-    badge: "bg-[#F1F5F9] text-[#475569]",
-    dot: "bg-[#94A3B8]",
+    badge: "bg-[#252B22] text-[#B7C0AD]",
+    dot: "bg-[#7F8A77]",
     rank: 3,
     meaning: "Background noise",
   },
@@ -48,26 +48,26 @@ export const LIFECYCLE: Record<
 > = {
   OPEN: {
     label: "Open",
-    badge: "bg-[#FEF2F2] text-[#B91C1C]",
-    dot: "bg-[#EF4444]",
+    badge: "bg-[#3A1915] text-[#FF9D93]",
+    dot: "bg-[#FF6B5E]",
     note: "Still firing, not yet acknowledged",
   },
   ACKNOWLEDGED: {
     label: "Acknowledged",
-    badge: "bg-[#EFF4FF] text-[#1D4ED8]",
-    dot: "bg-[#2563EB]",
+    badge: "bg-[#283414] text-[#E3FF7A]",
+    dot: "bg-[#C8FF3D]",
     note: "An engineer has taken ownership",
   },
   QUIESCENT: {
     label: "Quiet",
-    badge: "bg-[#F1F5F9] text-[#475569]",
-    dot: "bg-[#94A3B8]",
+    badge: "bg-[#252B22] text-[#B7C0AD]",
+    dot: "bg-[#7F8A77]",
     note: "Inside the adaptive quiet window",
   },
   RESOLVED: {
     label: "Resolved",
-    badge: "bg-[#F0FDF4] text-[#15803D]",
-    dot: "bg-[#16A34A]",
+    badge: "bg-[#183417] text-[#A6EA91]",
+    dot: "bg-[#88DF70]",
     note: "Closed out, no longer firing",
   },
 };
@@ -80,10 +80,10 @@ export const ROUTE_LABEL: Record<string, string> = {
 };
 
 export const ROUTE_BADGE: Record<string, string> = {
-  pagerduty: "bg-[#FEF2F2] text-[#B91C1C]",
-  slack: "bg-[#EFF4FF] text-[#1D4ED8]",
-  email: "bg-[#F1F5F9] text-[#475569]",
-  suppressed: "bg-[#F0FDF4] text-[#15803D]",
+  pagerduty: "bg-[#3A1915] text-[#FF9D93]",
+  slack: "bg-[#113447] text-[#7BE5FF]",
+  email: "bg-[#252B22] text-[#B7C0AD]",
+  suppressed: "bg-[#183417] text-[#A6EA91]",
 };
 
 export function severityRank(severity: Severity): number {
