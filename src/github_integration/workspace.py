@@ -669,16 +669,24 @@ class LocalPatchWorkspace:
             after_lines = item.after.splitlines() if item.after is not None else []
             from_file = f"a/{item.path}" if item.before is not None else "/dev/null"
             to_file = f"b/{item.path}" if item.after is not None else "/dev/null"
+            # `splitlines()` drops the line endings, and `unified_diff` only
+            # appends `lineterm` to the ---/+++/@@ headers — it assumes content
+            # lines already carry their own newline, as they would from
+            # `readlines()`. Passing newline-stripped lines with lineterm="\n"
+            # therefore produced a diff whose every content line was glued to
+            # the next. Emit no terminator and join the lines ourselves.
             fragments.extend(
                 difflib.unified_diff(
                     before_lines,
                     after_lines,
                     fromfile=from_file,
                     tofile=to_file,
-                    lineterm="\n",
+                    lineterm="",
                 )
             )
-        return "".join(fragments)
+        if not fragments:
+            return ""
+        return "\n".join(fragments) + "\n"
 
 
 def _require_mapping(payload: object, name: str) -> None:

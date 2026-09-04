@@ -151,7 +151,20 @@ pointing at the backend.
 ```bash
 pytest tests/ -q --tb=short
 python scripts/verify_chain.py
+python scripts/check_github_integration.py
+python scripts/qwen_diagnosis_demo.py
 ```
+
+`check_github_integration.py` walks the GitHub feature in the order it has to
+work — backend health, admin token, dashboard proxy, App registration,
+connected repositories, service mappings, incidents, local model — and prints
+the specific thing to change for every step that fails.
+
+`qwen_diagnosis_demo.py` feeds a deliberately broken file and a matching
+incident straight into the same local-model provider the API uses, then through
+the same patch workspace, and prints the diagnosis and the unified diff. It
+needs only Ollama, so the model half can be verified before the GitHub App
+exists. Neither script writes anything.
 
 `verify_chain.py` walks `raw_events` in sequence order, recomputes each row's
 hash from the previous row's hash plus the canonical event+decision payload,
