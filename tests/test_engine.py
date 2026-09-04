@@ -1,10 +1,15 @@
-"""Acceptance criteria for PulseGraph's pure mathematical engine."""
+"""Acceptance criteria for PulseGraph's mathematical core and wrapper."""
 
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import pytest
+from uuid import UUID, uuid4
 
 from src.engine.adaptive_ewma import calculate_quiet_deadline
 from src.engine.dedupe import generate_fingerprint, is_exact_duplicate
 from src.engine.incident_machine import transition_state
+from src.engine.process_event import IncidentOutcome, IncidentSnapshot, process_event
 
 
 def _event(**overrides: object) -> dict[str, object]:
@@ -135,3 +140,153 @@ def test_machine_only_reopens_resolved_incidents() -> None:
 )
 def test_machine_rejects_invalid_transitions(current_state: str, trigger: str) -> None:
     assert transition_state(current_state, trigger) is None
+
+
+@dataclass(frozen=True)
+class _NormalizedEvent:
+    event_id: UUID
+    fingerprint: str
+    source: str
+    service: str
+    alertname: str
+    severity_raw: str
+    status: str
+    labels: dict[str, str]
+    message: str
+    fired_at: datetime
+    raw_payload: dict[str, object]
+
+
+def _normalized_event(
+    *,
+    fired_at: datetime,
+    severity_raw: str = "warning",
+    status: str = "firing",
+    pod: str = "payment-api-a",
+) -> _NormalizedEvent:
+    labels = {
+        "environment": "production",
+        "cluster": "payments",
+        "pod": pod,
+        "pod_uid": f"uid-{pod}",
+    }
+    return _NormalizedEvent(
+        event_id=uuid4(),
+        fingerprint="ingest-fingerprint-is-not-the-engine-key",
+        source="prometheus",
+        service="payment-api",
+        alertname="HighCPUUsage",
+        severity_raw=severity_raw,
+        status=status,
+        labels=labels,
+        message="CPU above threshold",
+        fired_at=fired_at,
+        raw_payload={"labels": labels},
+    )
+
+
+@dataclass
+class _FakeTransaction:
+    candidate: IncidentSnapshot | None = None
+    lookup_calls: int = field(default=0, init=False)
+    requested_scope: str | None = field(default=None, init=False)
+
+    async def find_active_incident(
+        self, *, scope_key: str, fingerprint: str
+    ) -> IncidentSnapshot | None:
+        self.lookup_calls += 1
+        self.requested_scope = scope_key
+        return self.candidate
+
+
+def _incident_event_payload(event: _NormalizedEvent) -> dict[str, object]:
+    return {
+        "scope_key": "production/payments",
+        "service": event.service,
+        "alertname": event.alertname,
+        "severity_raw": event.severity_raw,
+        "status": event.status,
+        "labels": event.labels,
+    }
+
+
+def test_process_event_coalesces_a_duplicate_without_writing() -> None:
+    first_at = datetime(2026, 9, 4, tzinfo=timezone.utc)
+    first = _normalized_event(fired_at=first_at, pod="payment-api-a")
+    incident_id = uuid4()
+    transaction = _FakeTransaction(
+        candidate=IncidentSnapshot(
+            incident_id=incident_id,
+            state="OPEN",
+            last_event=_incident_event_payload(first),
+            last_seen_ms=int(first_at.timestamp() * 1000),
+            gap_history=(100.0, 120.0),
+            alert_count=2,
+        )
+    )
+    retry = _normalized_event(
+        fired_at=first_at + timedelta(milliseconds=100),
+        pod="payment-api-b",
+    )
+
+    outcome = asyncio.run(process_event(transaction, retry))
+
+    assert isinstance(outcome, IncidentOutcome)
+    assert outcome.incident_id == incident_id
+    assert outcome.is_duplicate is True
+    assert outcome.is_critical_bypass is False
+    assert outcome.new_state == "OPEN"
+    assert outcome.quiet_at_ms is not None
+    assert "DUPLICATE_COALESCED" in outcome.card_changes
+    assert transaction.lookup_calls == 1
+    assert transaction.requested_scope == "production/payments"
+
+
+def test_process_event_creates_a_new_open_incident_without_transaction_writes() -> None:
+    transaction = _FakeTransaction()
+    event = _normalized_event(fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc))
+
+    outcome = asyncio.run(process_event(transaction, event))
+
+    assert outcome.is_duplicate is False
+    assert outcome.new_state == "OPEN"
+    assert outcome.quiet_at_ms is not None
+    assert "INCIDENT_OPENED" in outcome.card_changes
+    assert transaction.lookup_calls == 1
+
+
+def test_process_event_bypasses_lookup_and_filtering_for_protected_critical() -> None:
+    transaction = _FakeTransaction()
+    event = _normalized_event(
+        fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc), severity_raw="critical"
+    )
+
+    outcome = asyncio.run(process_event(transaction, event))
+
+    assert outcome.is_critical_bypass is True
+    assert outcome.is_duplicate is False
+    assert outcome.new_state == "OPEN"
+    assert outcome.quiet_at_ms is None
+    assert outcome.card_changes == ("CRITICAL_BYPASS",)
+    assert transaction.lookup_calls == 0
+
+
+def test_process_event_reopens_a_resolved_duplicate() -> None:
+    first_at = datetime(2026, 9, 4, tzinfo=timezone.utc)
+    previous = _normalized_event(fired_at=first_at)
+    transaction = _FakeTransaction(
+        candidate=IncidentSnapshot(
+            incident_id=uuid4(),
+            state="RESOLVED",
+            last_event=_incident_event_payload(previous),
+            last_seen_ms=int(first_at.timestamp() * 1000),
+            gap_history=(),
+            alert_count=1,
+        )
+    )
+    firing_again = _normalized_event(fired_at=first_at + timedelta(seconds=1))
+
+    outcome = asyncio.run(process_event(transaction, firing_again))
+
+    assert outcome.new_state == "OPEN"
+    assert "STATE_RESOLVED_TO_OPEN" in outcome.card_changes
