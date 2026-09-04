@@ -1,17 +1,21 @@
-"""Pure incident lifecycle transition contract."""
+"""Pure, strict incident lifecycle transition logic."""
 
 from typing import Literal, TypeAlias
 
-# src.contracts.IncidentDecision.status uses precisely these four values.
-# The shared contract does not currently export an IncidentState alias.
-IncidentState: TypeAlias = Literal["new", "active", "quiet", "resolved"]
+# This uppercase lifecycle is the Phase 2 engine contract. Phase 4 must map it
+# to src.contracts.IncidentDecision.status, which currently uses lower-case
+# ``new | active | quiet | resolved`` and has no acknowledged status.
+IncidentState: TypeAlias = Literal["OPEN", "ACKNOWLEDGED", "QUIESCENT", "RESOLVED"]
+
+_TRANSITIONS: dict[tuple[IncidentState, str], IncidentState] = {
+    ("OPEN", "ACKNOWLEDGE"): "ACKNOWLEDGED",
+    ("ACKNOWLEDGED", "QUIET_TIMEOUT"): "QUIESCENT",
+    ("QUIESCENT", "RESOLVE"): "RESOLVED",
+    ("RESOLVED", "REOPEN"): "OPEN",
+}
 
 
-def transition_state(current: IncidentState, trigger: str) -> IncidentState | None:
-    """Return the next state for ``trigger``, or ``None`` when invalid.
+def transition_state(current_state: str, trigger: str) -> str | None:
+    """Return the next strict lifecycle state, or ``None`` when invalid."""
 
-    Transition mapping is intentionally deferred to Phase 3 after Phase 2
-    locks its acceptance tests.
-    """
-
-    raise NotImplementedError("Phase 3: implement lifecycle transitions")
+    return _TRANSITIONS.get((current_state, trigger))
