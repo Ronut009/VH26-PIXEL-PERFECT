@@ -79,4 +79,6 @@ async def test_deltas_emit_monotonic_incident_graph_card_and_metrics_events(db_c
     assert [event.stream_id for event in deltas] == sorted(event.stream_id for event in deltas)
     assert len({event.stream_id for event in deltas}) == 4
     assert deltas[1].data["edges"]
+    assert "decayed_joint_weight" in deltas[1].data["edges"][0]
+    assert "jointWeight" not in deltas[1].data["edges"][0]
     assert all("streamId" in event.encode() for event in deltas)

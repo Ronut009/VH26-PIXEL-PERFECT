@@ -2,9 +2,8 @@
 
 from typing import Literal, TypeAlias
 
-# This uppercase lifecycle is the Phase 2 engine contract. Phase 4 must map it
-# to src.contracts.IncidentDecision.status, which currently uses lower-case
-# ``new | active | quiet | resolved`` and has no acknowledged status.
+# This lifecycle matches src.contracts.IncidentState exactly:
+# ``OPEN | ACKNOWLEDGED | QUIESCENT | RESOLVED``.
 IncidentState: TypeAlias = Literal["OPEN", "ACKNOWLEDGED", "QUIESCENT", "RESOLVED"]
 
 _TRANSITIONS: dict[tuple[IncidentState, str], IncidentState] = {

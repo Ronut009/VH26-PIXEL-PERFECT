@@ -1,4 +1,9 @@
-"""Root-cause ranking from directed, decayed co-occurrence evidence."""
+"""Root-cause ranking from directed, decayed-joint co-occurrence evidence.
+
+Option B graph contract: ``edges.weight`` is the one persisted
+``decayed_joint_weight``. Source and target counts are intentionally not stored
+as separate columns, avoiding a risky schema migration during the hackathon.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +28,7 @@ def _parse_time_ms(value: str) -> int:
 async def rank_root_cause(
     tx: aiosqlite.Connection, *, half_life_ms: float = DEFAULT_HALF_LIFE_MS
 ) -> str | None:
-    """Return the active node with the strongest decayed outbound joint evidence."""
+    """Return the active node with the strongest outbound decayed_joint_weight."""
 
     active_placeholders = ", ".join("?" for _ in _ACTIVE_STATES)
     async with tx.execute(
@@ -56,4 +61,4 @@ async def rank_root_cause(
         scores[row["src_incident_id"]] += score
 
     root_id, score = max(scores.items(), key=lambda item: (item[1], item[0]))
-    return f"root_cause={root_id}; outbound_joint_weight={score:.6f}"
+    return f"root_cause={root_id}; outbound_decayed_joint_weight={score:.6f}"

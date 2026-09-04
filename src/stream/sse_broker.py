@@ -87,7 +87,7 @@ async def read_snapshot(
                 {
                     "sourceIncidentId": row["src_incident_id"],
                     "targetIncidentId": row["dst_incident_id"],
-                    "jointWeight": row["weight"],
+                    "decayed_joint_weight": row["weight"],
                     "lastSeenAt": row["last_seen_at"],
                 }
                 for row in edges
@@ -159,7 +159,7 @@ async def read_delta_events(
                         {
                             "sourceIncidentId": edge["src_incident_id"],
                             "targetIncidentId": edge["dst_incident_id"],
-                            "jointWeight": edge["weight"],
+                            "decayed_joint_weight": edge["weight"],
                             "lastSeenAt": edge["last_seen_at"],
                         }
                         for edge in await _edges_for_incident(tx, raw_event["incident_id"])

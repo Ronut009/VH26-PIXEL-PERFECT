@@ -65,7 +65,8 @@ async def observe_incident(
 
     The persisted schema names the co-occurrence store ``edges``. Each related
     active incident that fired first becomes the directed source for the current
-    incident, preserving lead/lag evidence for root-cause ranking.
+    incident, preserving lead/lag evidence for root-cause ranking. Under the
+    Option B graph contract, ``edges.weight`` stores decayed_joint_weight.
     """
 
     current_id = str(incident_id)

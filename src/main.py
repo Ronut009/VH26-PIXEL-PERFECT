@@ -1,7 +1,13 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
 
 from fastapi import FastAPI, HTTPException, Request
+
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import settings
 from src.contracts import NormalizedEvent
@@ -114,3 +120,9 @@ async def health(request: Request):
         return {"status": "healthy"}
     except Exception as exc:
         return {"status": "unhealthy", "error": str(exc)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)

@@ -75,6 +75,7 @@ async def test_storm_replay_creates_directed_edge_and_ranks_leader(db_conn) -> N
     assert edges[0]["weight"] == pytest.approx(1.0)
     assert hint is not None
     assert source_result["incident_id"] in hint
+    assert "outbound_decayed_joint_weight=" in hint
 
 
 @pytest.mark.asyncio
