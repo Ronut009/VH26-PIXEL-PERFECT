@@ -291,6 +291,7 @@ export default function Home() {
                   readiness={readiness}
                   onRetry={recheckGithub}
                   target={investigationTarget}
+                  incidents={shown}
                 />
               )}
 

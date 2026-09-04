@@ -25,7 +25,10 @@ export function useGithubReadiness() {
   const [attempt, setAttempt] = useState(0);
 
   const reload = useCallback(() => {
-    setReadiness({ kind: "loading" });
+    // Keep a working list on screen while re-reading it. Dropping back to
+    // "loading" would unmount the repository manager mid-task and discard the
+    // snapshot summary the operator just pinned.
+    setReadiness((current) => (current.kind === "ready" ? current : { kind: "loading" }));
     setAttempt((count) => count + 1);
   }, []);
 

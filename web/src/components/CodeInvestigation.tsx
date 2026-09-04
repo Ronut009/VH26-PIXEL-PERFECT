@@ -1,6 +1,8 @@
 "use client";
 
 import { Panel } from "./OverviewPanels";
+import { DiagnosisPanel } from "./github/DiagnosisPanel";
+import { RepositoryManager } from "./github/RepositoryManager";
 import { repositoryForService, type GithubReadiness } from "@/hooks/useGithubReadiness";
 import { serviceOf } from "@/lib/theme";
 import type { Incident } from "@/lib/types";
@@ -77,7 +79,11 @@ function ConnectionState({
   switch (readiness.kind) {
     case "loading":
       return (
-        <StatusNote tone="muted" title="Checking connection" body="Reading the connected repository list." />
+        <StatusNote
+          tone="muted"
+          title="Checking connection"
+          body="Reading the connected repository list."
+        />
       );
     case "unconfigured":
       return (
@@ -121,7 +127,7 @@ function ConnectionState({
           <StatusNote
             tone="warn"
             title="No repositories connected"
-            body="The GitHub App is configured but no repositories are selected for it yet. Install it and choose the repositories PulseGraph may read."
+            body="The GitHub App is configured but no repositories are selected for it yet. Install it below and choose the repositories PulseGraph may read."
             action={<RetryButton onClick={onRetry} />}
           />
         );
@@ -141,26 +147,31 @@ function ConnectionState({
 }
 
 /**
- * The Code Investigation view.
- *
- * It deliberately shows connection state and the service-to-repository map
- * read-only — there are no controls here that install an app, change a
- * mapping, pin a snapshot, or run a diagnosis. Those screens are not built
- * yet, and a control that looks like it works but doesn't is worse than none.
+ * The Code Investigation view: connect repositories, pin the commit an
+ * analysis reads, then diagnose an incident against it and read the resulting
+ * patch preview.
  */
 export function CodeInvestigation({
   readiness,
   onRetry,
   target,
+  incidents,
 }: {
   readiness: GithubReadiness;
   onRetry: () => void;
   /** The incident sent here by "Investigate code", if any. */
   target: Incident | null;
+  /** Used to offer the service names that actually appear on incidents. */
+  incidents: Incident[];
 }) {
-  const repositories = readiness.kind === "ready" ? readiness.repositories : [];
+  const isReady = readiness.kind === "ready";
+  const repositories = isReady ? readiness.repositories : [];
   const targetService = target ? serviceOf(target.title) : null;
   const targetRepository = targetService ? repositoryForService(readiness, targetService) : null;
+
+  const serviceSuggestions = Array.from(
+    new Set(incidents.map((incident) => serviceOf(incident.title))),
+  ).sort();
 
   return (
     <div className="space-y-5">
@@ -176,111 +187,82 @@ export function CodeInvestigation({
         <ConnectionState readiness={readiness} onRetry={onRetry} />
       </Panel>
 
-      <Panel
-        title="Selected incident"
-        hint="The incident sent here from the incident drawer"
-      >
+      <Panel title="Selected incident" hint="The incident sent here from the incident drawer">
         {!target ? (
           <p className="text-[13px] text-text-2">
             No incident selected. Open an incident and choose{" "}
             <span className="font-medium text-text">Investigate code</span> to bring it here.
           </p>
         ) : (
-          <dl className="divide-y divide-edge text-[13px]">
-            <div className="flex flex-wrap justify-between gap-4 pb-2.5">
-              <dt className="text-text-2">Incident</dt>
-              <dd className="text-right font-medium text-text">{target.title}</dd>
-            </div>
-            <div className="flex flex-wrap justify-between gap-4 py-2.5">
-              <dt className="text-text-2">Service</dt>
-              <dd className="text-right font-mono text-text">{targetService}</dd>
-            </div>
-            <div className="flex flex-wrap justify-between gap-4 py-2.5">
-              <dt className="text-text-2">Mapped repository</dt>
-              <dd className="text-right font-mono text-text">
-                {targetRepository ? (
-                  targetRepository.full_name
-                ) : (
-                  <span className="font-sans text-[#B45309]">none</span>
-                )}
-              </dd>
-            </div>
-            <div className="flex flex-wrap justify-between gap-4 pt-2.5">
-              <dt className="text-text-2">Incident ID</dt>
-              <dd className="break-all text-right font-mono text-[12px] text-text-2">
-                {target.incident_id}
-              </dd>
-            </div>
-          </dl>
-        )}
+          <>
+            <dl className="divide-y divide-edge text-[13px]">
+              <div className="flex flex-wrap justify-between gap-4 pb-2.5">
+                <dt className="text-text-2">Incident</dt>
+                <dd className="text-right font-medium text-text">{target.title}</dd>
+              </div>
+              <div className="flex flex-wrap justify-between gap-4 py-2.5">
+                <dt className="text-text-2">Service</dt>
+                <dd className="text-right font-mono text-text">{targetService}</dd>
+              </div>
+              <div className="flex flex-wrap justify-between gap-4 py-2.5">
+                <dt className="text-text-2">Mapped repository</dt>
+                <dd className="text-right font-mono text-text">
+                  {targetRepository ? (
+                    targetRepository.full_name
+                  ) : (
+                    <span className="font-sans text-[#B45309]">none</span>
+                  )}
+                </dd>
+              </div>
+              <div className="flex flex-wrap justify-between gap-4 pt-2.5">
+                <dt className="text-text-2">Incident ID</dt>
+                <dd className="break-all text-right font-mono text-[12px] text-text-2">
+                  {target.incident_id}
+                </dd>
+              </div>
+            </dl>
 
-        {target && !targetRepository && readiness.kind === "ready" && (
-          <div className="mt-4">
-            <StatusNote
-              tone="warn"
-              title="No repository mapped"
-              body={`Nothing is mapped to “${targetService}”, so there is no pinned source to read. Map the service to one of the connected repositories to investigate it.`}
-            />
-          </div>
-        )}
-
-        {target && targetRepository && (
-          <div className="mt-4">
-            <StatusNote
-              tone="muted"
-              title="Diagnosis is not wired up yet"
-              body={`This incident is ready to investigate against ${targetRepository.full_name}. Running a bounded diagnosis and reviewing a patch preview is the next slice; the backend endpoints and the proxy routes for them already exist.`}
-            />
-          </div>
+            <div className="mt-4">
+              {!isReady ? (
+                <StatusNote
+                  tone="muted"
+                  title="Diagnosis unavailable"
+                  body="Connect the GitHub App before diagnosing this incident against its source."
+                />
+              ) : !targetRepository ? (
+                <StatusNote
+                  tone="warn"
+                  title="No repository mapped"
+                  body={`Nothing is mapped to “${targetService}”, so there is no pinned source to read. Map the service to one of the connected repositories below.`}
+                />
+              ) : (
+                <DiagnosisPanel
+                  // Remount per incident so switching targets never shows the
+                  // previous incident's analyses.
+                  key={target.incident_id}
+                  incident={target}
+                  repository={targetRepository}
+                />
+              )}
+            </div>
+          </>
         )}
       </Panel>
 
       <Panel
-        title="Connected repositories"
+        title="Repositories"
         hint="Read-only, and only the repositories selected on the installation"
       >
-        {repositories.length === 0 ? (
+        {!isReady ? (
           <p className="text-[13px] text-text-2">
-            No repositories to show. This list is populated by the GitHub App installation.
+            Repository management becomes available once the GitHub App connection is working.
           </p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] border-collapse text-left">
-              <thead>
-                <tr className="border-b border-edge text-[11px] uppercase tracking-wide text-text-3">
-                  <th className="py-2.5 pr-3 font-medium">Repository</th>
-                  <th className="px-3 py-2.5 font-medium">Mapped service</th>
-                  <th className="px-3 py-2.5 font-medium">Default branch</th>
-                  <th className="py-2.5 pl-3 font-medium">Installation</th>
-                </tr>
-              </thead>
-              <tbody>
-                {repositories.map((repository) => (
-                  <tr key={repository.repository_id} className="border-b border-edge/70">
-                    <td className="py-3 pr-3">
-                      <p className="font-mono text-[13px] text-text">{repository.full_name}</p>
-                      {repository.is_private ? (
-                        <p className="mt-0.5 text-[11px] text-text-3">private</p>
-                      ) : null}
-                    </td>
-                    <td className="px-3 py-3 text-[13px]">
-                      {repository.service ? (
-                        <span className="font-mono text-text">{repository.service}</span>
-                      ) : (
-                        <span className="text-text-3">unmapped</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-3 font-mono text-[13px] text-text-2">
-                      {repository.default_branch}
-                    </td>
-                    <td className="py-3 pl-3 text-[13px] text-text-2">
-                      {repository.account_login}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <RepositoryManager
+            repositories={repositories}
+            serviceSuggestions={serviceSuggestions}
+            onChanged={onRetry}
+          />
         )}
       </Panel>
 
