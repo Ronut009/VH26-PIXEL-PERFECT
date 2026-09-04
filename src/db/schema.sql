@@ -1,4 +1,11 @@
 -- WAL mode + reasonable pragmas for concurrency
+-- NOTE: indexes over columns that arrive by migration (priority, locked_until,
+-- correlation_group_id, last_ingested_at) are NOT declared here. This script
+-- runs before ALTER TABLE does, so on an existing database those columns do
+-- not exist yet and the whole script aborts - taking the migration that would
+-- have added them down with it. They are created in src/db/connection.py,
+-- after the columns exist. See _MIGRATED_COLUMN_INDEXES.
+
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
@@ -113,8 +120,6 @@ CREATE INDEX IF NOT EXISTS idx_incidents_scope_stable
     ON incidents(scope_key, stable_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_incidents_quiet_deadline
     ON incidents(status, quiet_at_ms);
-CREATE INDEX IF NOT EXISTS idx_incidents_last_ingested
-    ON incidents(status, last_ingested_at);
 
 -- ─────────────────────────────────────────────────────────────
 -- edges: co-occurrence graph, owned by Anish
@@ -230,11 +235,6 @@ CREATE TABLE IF NOT EXISTS outbox (
     sent_at         TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_outbox_pending
-    ON outbox(status, next_attempt_at, priority, outbox_id)
-    WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_outbox_lease ON outbox(locked_until)
-    WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_outbox_incident ON outbox(incident_id);
 
 -- ─────────────────────────────────────────────────────────────
@@ -272,8 +272,6 @@ CREATE INDEX IF NOT EXISTS idx_incident_groups_scope
     ON incident_groups(scope_key, status);
 CREATE INDEX IF NOT EXISTS idx_incident_groups_anchor
     ON incident_groups(anchor_incident_id);
-CREATE INDEX IF NOT EXISTS idx_incidents_group
-    ON incidents(correlation_group_id);
 
 -- ─────────────────────────────────────────────────────────────
 -- inbound_events: every signed callback we accept from a provider.

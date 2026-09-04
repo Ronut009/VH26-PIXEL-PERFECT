@@ -87,11 +87,41 @@ async def _ensure_columns(conn: aiosqlite.Connection) -> None:
                 )
 
 
+# Indexes over columns that arrive by migration. These cannot live in
+# schema.sql: that script runs *before* ALTER TABLE does, so on an existing
+# database the column does not exist yet, the whole script aborts, and it takes
+# down the migration that would have added it. The result is a database that
+# can never be opened again - which is exactly what happened.
+_MIGRATED_COLUMN_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_incidents_last_ingested"
+    " ON incidents(status, last_ingested_at)",
+    "CREATE INDEX IF NOT EXISTS idx_incidents_group"
+    " ON incidents(correlation_group_id)",
+    "CREATE INDEX IF NOT EXISTS idx_outbox_pending"
+    " ON outbox(status, next_attempt_at, priority, outbox_id)"
+    " WHERE status = 'pending'",
+    "CREATE INDEX IF NOT EXISTS idx_outbox_lease"
+    " ON outbox(locked_until) WHERE status = 'pending'",
+)
+
+
+async def _ensure_indexes(conn: aiosqlite.Connection) -> None:
+    for statement in _MIGRATED_COLUMN_INDEXES:
+        await conn.execute(statement)
+
+
 async def _ensure_schema(conn: aiosqlite.Connection) -> None:
-    """Apply idempotent schema additions before application work begins."""
+    """Apply idempotent schema additions before application work begins.
+
+    Order is load-bearing: tables, then the columns migrations add to them,
+    then the indexes that reference those columns. Creating an index before its
+    column exists aborts the whole script on any database that predates the
+    column.
+    """
 
     await conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     await _ensure_columns(conn)
+    await _ensure_indexes(conn)
     await conn.commit()
 
 
