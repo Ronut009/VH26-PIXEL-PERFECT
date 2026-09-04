@@ -12,6 +12,12 @@ from typing import TYPE_CHECKING, Any, Mapping, Protocol
 from uuid import UUID, uuid4
 
 from .adaptive_ewma import calculate_quiet_deadline
+from .critical_bypass import (
+    AuditLedgerEntry,
+    DeliveryIntent,
+    build_bypass_artifacts,
+    classify_protected_critical,
+)
 from .dedupe import generate_fingerprint, is_exact_duplicate
 from .incident_machine import transition_state
 
@@ -53,6 +59,8 @@ class IncidentOutcome:
     alert_count: int
     mean_gap: float | None = None
     variance: float | None = None
+    delivery_intents: tuple[DeliveryIntent, ...] = ()
+    audit_entry: AuditLedgerEntry | None = None
 
 
 def _event_time_ms(event: NormalizedEvent) -> int:
@@ -82,15 +90,6 @@ def _event_payload(event: NormalizedEvent, scope_key: str) -> dict[str, Any]:
     }
 
 
-def _is_protected_critical(event: NormalizedEvent) -> bool:
-    """Mirror Yash's severity=critical or priority=P0 protected predicate."""
-
-    return (
-        event.severity_raw.lower() == "critical"
-        or event.labels.get("priority", "").upper() == "P0"
-    )
-
-
 def _next_state(current_state: str, event_status: str) -> str:
     if event_status == "resolved":
         return transition_state(current_state, "RESOLVE") or current_state
@@ -109,15 +108,22 @@ async def process_event(
     against the candidate's stable payload, and assigned a dynamic deadline.
     """
 
-    if _is_protected_critical(normalized_event):
+    bypass_decision = classify_protected_critical(normalized_event)
+    if bypass_decision.should_bypass:
+        incident_id = uuid4()
+        delivery_intents, audit_entry = build_bypass_artifacts(
+            normalized_event, incident_id, bypass_decision
+        )
         return IncidentOutcome(
-            incident_id=uuid4(),
+            incident_id=incident_id,
             new_state="OPEN",
             quiet_at_ms=None,
             card_changes=("CRITICAL_BYPASS",),
             is_critical_bypass=True,
             is_duplicate=False,
             alert_count=1,
+            delivery_intents=delivery_intents,
+            audit_entry=audit_entry,
         )
 
     scope_key = _scope_key(normalized_event)

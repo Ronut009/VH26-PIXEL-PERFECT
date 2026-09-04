@@ -10,6 +10,7 @@ IncidentState: TypeAlias = Literal["OPEN", "ACKNOWLEDGED", "QUIESCENT", "RESOLVE
 _TRANSITIONS: dict[tuple[IncidentState, str], IncidentState] = {
     ("OPEN", "ACKNOWLEDGE"): "ACKNOWLEDGED",
     ("ACKNOWLEDGED", "QUIET_TIMEOUT"): "QUIESCENT",
+    ("ACKNOWLEDGED", "QUIET_DEADLINE"): "QUIESCENT",
     ("QUIESCENT", "RESOLVE"): "RESOLVED",
     ("RESOLVED", "REOPEN"): "OPEN",
 }

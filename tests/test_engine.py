@@ -1,15 +1,21 @@
 """Acceptance criteria for PulseGraph's mathematical core and wrapper."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import pytest
 from uuid import UUID, uuid4
 
 from src.engine.adaptive_ewma import calculate_quiet_deadline
+from src.engine.critical_bypass import (
+    build_bypass_artifacts,
+    classify_protected_critical,
+)
 from src.engine.dedupe import generate_fingerprint, is_exact_duplicate
 from src.engine.incident_machine import transition_state
 from src.engine.process_event import IncidentOutcome, IncidentSnapshot, process_event
+from src.engine.timer_wheel import TimerWheel
 
 
 def _event(**overrides: object) -> dict[str, object]:
@@ -163,6 +169,10 @@ def _normalized_event(
     severity_raw: str = "warning",
     status: str = "firing",
     pod: str = "payment-api-a",
+    service: str = "payment-api",
+    alertname: str = "HighCPUUsage",
+    message: str = "CPU above threshold",
+    extra_labels: dict[str, str] | None = None,
 ) -> _NormalizedEvent:
     labels = {
         "environment": "production",
@@ -170,16 +180,18 @@ def _normalized_event(
         "pod": pod,
         "pod_uid": f"uid-{pod}",
     }
+    if extra_labels:
+        labels.update(extra_labels)
     return _NormalizedEvent(
         event_id=uuid4(),
         fingerprint="ingest-fingerprint-is-not-the-engine-key",
         source="prometheus",
-        service="payment-api",
-        alertname="HighCPUUsage",
+        service=service,
+        alertname=alertname,
         severity_raw=severity_raw,
         status=status,
         labels=labels,
-        message="CPU above threshold",
+        message=message,
         fired_at=fired_at,
         raw_payload={"labels": labels},
     )
@@ -269,6 +281,12 @@ def test_process_event_bypasses_lookup_and_filtering_for_protected_critical() ->
     assert outcome.quiet_at_ms is None
     assert outcome.card_changes == ("CRITICAL_BYPASS",)
     assert transaction.lookup_calls == 0
+    assert {intent.provider for intent in outcome.delivery_intents} == {
+        "pagerduty",
+        "slack",
+    }
+    assert outcome.audit_entry is not None
+    assert outcome.audit_entry.decision == "CRITICAL_BYPASS"
 
 
 def test_process_event_reopens_a_resolved_duplicate() -> None:
@@ -290,3 +308,90 @@ def test_process_event_reopens_a_resolved_duplicate() -> None:
 
     assert outcome.new_state == "OPEN"
     assert "STATE_RESOLVED_TO_OPEN" in outcome.card_changes
+
+
+def test_timer_wheel_emits_deadlines_in_time_order() -> None:
+    wheel = TimerWheel()
+    later_id = uuid4()
+    earlier_id = uuid4()
+
+    wheel.schedule(later_id, 300)
+    wheel.schedule(earlier_id, 100)
+
+    assert wheel.pop_due(99) == ()
+    due = wheel.pop_due(100)
+    assert len(due) == 1
+    assert due[0].incident_id == earlier_id
+    assert due[0].trigger == "QUIET_DEADLINE"
+    assert transition_state("ACKNOWLEDGED", due[0].trigger) == "QUIESCENT"
+
+    assert wheel.pop_due(299) == ()
+    assert wheel.pop_due(300)[0].incident_id == later_id
+
+
+def test_timer_wheel_discards_stale_deadlines_after_reschedule() -> None:
+    wheel = TimerWheel()
+    incident_id = uuid4()
+
+    wheel.schedule(incident_id, 100)
+    wheel.schedule(incident_id, 200)
+
+    assert wheel.pop_due(100) == ()
+    due = wheel.pop_due(200)
+    assert len(due) == 1
+    assert due[0].incident_id == incident_id
+    assert due[0].quiet_at_ms == 200
+
+
+def test_timer_wheel_is_safe_for_concurrent_scheduling() -> None:
+    wheel = TimerWheel()
+    incident_ids = [uuid4() for _ in range(32)]
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda item: wheel.schedule(item, 1_000), incident_ids))
+
+    due = wheel.pop_due(1_000)
+    assert {trigger.incident_id for trigger in due} == set(incident_ids)
+
+
+@pytest.mark.parametrize(
+    ("service", "alertname", "message", "reason"),
+    [
+        ("payment-api", "PaymentFailureRate", "payment capture failures", "PAYMENT_FAILURE"),
+        ("auth-service", "AuthenticationOutage", "authentication unavailable", "AUTH_OUTAGE"),
+        ("storage-service", "DataLossDetected", "data loss detected", "DATA_LOSS"),
+    ],
+)
+def test_hardcoded_protected_emergencies_bypass_filters(
+    service: str, alertname: str, message: str, reason: str
+) -> None:
+    event = _normalized_event(
+        fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        service=service,
+        alertname=alertname,
+        message=message,
+    )
+
+    decision = classify_protected_critical(event)
+
+    assert decision.should_bypass is True
+    assert decision.reason == reason
+
+
+def test_p0_bypass_generates_idempotent_delivery_and_audit_artifacts() -> None:
+    event = _normalized_event(
+        fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        extra_labels={"priority": "P0"},
+    )
+    incident_id = uuid4()
+    decision = classify_protected_critical(event)
+
+    intents, audit_entry = build_bypass_artifacts(event, incident_id, decision)
+
+    assert decision.should_bypass is True
+    assert decision.reason == "PRIORITY_P0"
+    assert {intent.provider for intent in intents} == {"pagerduty", "slack"}
+    assert len({intent.idempotency_key for intent in intents}) == 2
+    assert audit_entry.event_id == event.event_id
+    assert audit_entry.incident_id == incident_id
+    assert audit_entry.decision == "CRITICAL_BYPASS"
