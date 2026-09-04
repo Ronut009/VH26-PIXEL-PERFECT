@@ -117,6 +117,15 @@ a critical payment failure that immediately bypasses aggregation.
 | `ENVIRONMENT` | `dev` / etc., informational |
 | `OUTBOX_POLL_INTERVAL_MS` | How often the OutboxWorker polls for pending deliveries (default `500`) |
 | `OUTBOX_MAX_ATTEMPTS` | Attempts before an outbox row is marked `dead` (default `5`) |
+| `GITHUB_APP_CLIENT_ID` | GitHub App Client ID for the read-only GitHub integration |
+| `GITHUB_APP_PRIVATE_KEY` | GitHub App PEM private key (deployment secret) |
+| `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub App webhook verification |
+| `GITHUB_ADMIN_TOKEN` | Temporary protection for GitHub management endpoints until dashboard auth exists |
+| `GITHUB_DIAGNOSIS_MAX_*` | Bounded in-memory source context for one incident diagnosis |
+| `GITHUB_PATCH_MAX_*` | Bounded local-workspace files, proposal, and diff sizes |
+| `OLLAMA_ENABLED` | Enables the optional local-only open-model provider (default `false`) |
+| `OLLAMA_MODEL` | Local model name, e.g. `qwen2.5-coder:7b` |
+| `OLLAMA_BASE_URL` | Loopback Ollama endpoint only (default `http://127.0.0.1:11434`) |
 
 Real values live in `.env` (gitignored) — see `.env.example` for the template.
 The dashboard has its own `web/.env.local`, with just `NEXT_PUBLIC_API_BASE`
@@ -127,6 +136,12 @@ pointing at the backend.
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/v1/ingest/prometheus` | Ingest a Prometheus AlertManager webhook payload |
+| `POST` | `/v1/github/webhooks` | Verify and process GitHub App installation lifecycle webhooks |
+| `GET` | `/v1/github/repositories` | List selected read-only GitHub repositories (admin token required) |
+| `POST` | `/v1/github/repositories/{id}/snapshots` | Pin a default-branch source inventory to an immutable commit (admin token required) |
+| `POST` | `/v1/github/incidents/{id}/diagnoses` | Produce a bounded, grounded diagnosis or a safe fallback (admin token required) |
+| `GET` | `/v1/github/incidents/{id}/diagnoses` | List sanitized diagnosis records for an incident (admin token required) |
+| `POST` | `/v1/github/analyses/{id}/patch-preview` | Generate a local-only, human-reviewable diff; never writes GitHub (admin token required) |
 | `GET` | `/v1/incidents/recent?since=<iso8601>` | Poll-friendly incident list, consumed by the dashboard |
 | `GET` | `/v1/stream[?after=<streamId>]` | Server-Sent Events — snapshot + live deltas (`incident.upsert`, `graph.edge.upsert`, `card.update`, `metrics.update`) |
 | `GET` | `/v1/health` | Liveness check — executes `SELECT 1` against the writer connection |
@@ -142,6 +157,18 @@ python scripts/verify_chain.py
 hash from the previous row's hash plus the canonical event+decision payload,
 and confirms every stored hash matches — proving the audit ledger wasn't
 tampered with.
+
+## GitHub incident-to-patch MVP
+
+The GitHub integration is deliberately read-only: it accepts signed GitHub App
+installation webhooks, maps a monitored service to a selected repository,
+pins immutable commit/tree/blob metadata, builds a small source context for a
+grounded diagnosis, and can return a disposable local patch preview. It cannot
+push, create a branch, pull request, issue, comment, or commit; merge code; or
+clone, pull, or modify a repository. See [GitHub Phase 1
+setup](docs/github-phase1-setup.md) for GitHub App registration and
+[GitHub incident-to-patch MVP](docs/github-integration-mvp.md) for the full
+four-phase workflow and local Ollama configuration.
 
 ## Ownership
 

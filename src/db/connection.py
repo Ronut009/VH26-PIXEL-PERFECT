@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import aiosqlite
 
@@ -11,11 +12,19 @@ PRAGMAS = (
     "PRAGMA foreign_keys = ON",
     "PRAGMA busy_timeout = 5000",
 )
+SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
 async def _apply_pragmas(conn: aiosqlite.Connection) -> None:
     for pragma in PRAGMAS:
         await conn.execute(pragma)
+
+
+async def _ensure_schema(conn: aiosqlite.Connection) -> None:
+    """Apply idempotent schema additions before application work begins."""
+
+    await conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    await conn.commit()
 
 
 class Database:
@@ -36,6 +45,7 @@ class Database:
         self.writer_conn = await aiosqlite.connect(self.db_path)
         self.writer_conn.row_factory = aiosqlite.Row
         await _apply_pragmas(self.writer_conn)
+        await _ensure_schema(self.writer_conn)
 
     async def close(self) -> None:
         if self.writer_conn is not None:

@@ -135,3 +135,154 @@ CREATE INDEX IF NOT EXISTS idx_delivery_intents_incident
     ON delivery_intents(incident_id);
 CREATE INDEX IF NOT EXISTS idx_delivery_intents_pending
     ON delivery_intents(status, created_at);
+
+-- ─────────────────────────────────────────────────────────────
+-- GitHub Phase 1: read-only repository connection and snapshots.
+-- Source contents are deliberately not stored here. Snapshots pin a commit
+-- and immutable Git object IDs so later analysis is reproducible without
+-- granting the GitHub App any write capability.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS github_installations (
+    installation_id        INTEGER PRIMARY KEY,
+    account_login          TEXT NOT NULL,
+    account_type           TEXT NOT NULL,
+    repository_selection   TEXT NOT NULL DEFAULT 'selected',
+    status                 TEXT NOT NULL DEFAULT 'active',
+    suspended_at           TEXT,
+    permissions_json       TEXT NOT NULL DEFAULT '{}',
+    installed_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+-- Provider event ordering is kept separately so this remains an additive
+-- migration for databases that already contain the Phase 1 installation table.
+-- GitHub can deliver signed webhooks out of order; this monotonic record stops
+-- old lifecycle/selection payloads from restoring access after revocation.
+CREATE TABLE IF NOT EXISTS github_installation_state_versions (
+    installation_id          INTEGER PRIMARY KEY,
+    provider_updated_at_us   INTEGER NOT NULL,
+    provider_event_priority  INTEGER NOT NULL,
+    revision                 INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+    updated_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    FOREIGN KEY (installation_id) REFERENCES github_installations(installation_id)
+);
+
+CREATE TABLE IF NOT EXISTS github_repositories (
+    repository_id          INTEGER PRIMARY KEY,
+    installation_id        INTEGER NOT NULL,
+    owner                  TEXT NOT NULL,
+    name                   TEXT NOT NULL,
+    full_name              TEXT NOT NULL UNIQUE,
+    default_branch         TEXT NOT NULL,
+    html_url               TEXT,
+    is_private             INTEGER NOT NULL DEFAULT 1 CHECK (is_private IN (0, 1)),
+    is_archived            INTEGER NOT NULL DEFAULT 0 CHECK (is_archived IN (0, 1)),
+    is_selected            INTEGER NOT NULL DEFAULT 1 CHECK (is_selected IN (0, 1)),
+    last_seen_commit_sha   TEXT,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    FOREIGN KEY (installation_id) REFERENCES github_installations(installation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_repositories_installation
+    ON github_repositories(installation_id, is_selected);
+
+CREATE TABLE IF NOT EXISTS github_service_mappings (
+    service                TEXT PRIMARY KEY,
+    repository_id          INTEGER NOT NULL,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    FOREIGN KEY (repository_id) REFERENCES github_repositories(repository_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_service_mappings_repository
+    ON github_service_mappings(repository_id);
+
+CREATE TABLE IF NOT EXISTS github_snapshots (
+    snapshot_id            TEXT PRIMARY KEY,
+    repository_id          INTEGER NOT NULL,
+    ref                    TEXT NOT NULL,
+    commit_sha             TEXT NOT NULL,
+    tree_sha               TEXT NOT NULL,
+    file_count             INTEGER NOT NULL DEFAULT 0,
+    tree_truncated         INTEGER NOT NULL DEFAULT 0 CHECK (tree_truncated IN (0, 1)),
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (repository_id, commit_sha),
+    FOREIGN KEY (repository_id) REFERENCES github_repositories(repository_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_snapshots_repository_created
+    ON github_snapshots(repository_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS github_snapshot_files (
+    snapshot_id            TEXT NOT NULL,
+    path                   TEXT NOT NULL,
+    blob_sha               TEXT NOT NULL,
+    mode                   TEXT NOT NULL,
+    object_type            TEXT NOT NULL,
+    size_bytes             INTEGER,
+    PRIMARY KEY (snapshot_id, path),
+    FOREIGN KEY (snapshot_id) REFERENCES github_snapshots(snapshot_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_snapshot_files_blob
+    ON github_snapshot_files(blob_sha);
+
+CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
+    delivery_id            TEXT PRIMARY KEY,
+    event_type             TEXT NOT NULL,
+    action                 TEXT,
+    installation_id        INTEGER,
+    payload_sha256         TEXT NOT NULL,
+    processing_status      TEXT NOT NULL DEFAULT 'accepted',
+    received_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    processed_at           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_webhook_deliveries_installation
+    ON github_webhook_deliveries(installation_id, received_at DESC);
+
+-- ─────────────────────────────────────────────────────────────
+-- GitHub analysis results: append-only, sanitized diagnosis records.
+-- These rows intentionally omit source excerpts, GitHub tokens, raw source
+-- code, patches, and raw provider payloads. They retain only reproducible
+-- snapshot identity, bounded context metadata, and reviewable conclusions.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS github_incident_analyses (
+    analysis_id                    TEXT PRIMARY KEY,       -- UUID v4
+    incident_id                    TEXT NOT NULL,
+    service                        TEXT NOT NULL,
+    repository_id                  INTEGER NOT NULL,
+    snapshot_id                    TEXT NOT NULL,
+    status                         TEXT NOT NULL
+        CHECK (status IN ('diagnosed', 'fallback')),
+    provider                       TEXT NOT NULL,
+    confidence                     REAL NOT NULL
+        CHECK (confidence >= 0.0 AND confidence <= 1.0),
+
+    root_cause_summary             TEXT,
+    root_cause_reasoning           TEXT,
+    evidence_json                  TEXT NOT NULL DEFAULT '[]',
+    proposed_fix_summary           TEXT,
+    proposed_fix_steps_json        TEXT NOT NULL DEFAULT '[]',
+    proposed_fix_paths_json        TEXT NOT NULL DEFAULT '[]',
+    fallback_reason                TEXT,
+    fallback_message               TEXT,
+    fallback_next_steps_json       TEXT NOT NULL DEFAULT '[]',
+
+    source_context_digest          TEXT NOT NULL,           -- metadata-only SHA-256
+    source_excerpt_count           INTEGER NOT NULL DEFAULT 0
+        CHECK (source_excerpt_count >= 0),
+    source_bytes                   INTEGER NOT NULL DEFAULT 0
+        CHECK (source_bytes >= 0),
+    created_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+
+    FOREIGN KEY (incident_id) REFERENCES incidents(incident_id),
+    FOREIGN KEY (repository_id) REFERENCES github_repositories(repository_id),
+    FOREIGN KEY (snapshot_id) REFERENCES github_snapshots(snapshot_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_incident_analyses_incident_created
+    ON github_incident_analyses(incident_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_github_incident_analyses_snapshot
+    ON github_incident_analyses(snapshot_id, created_at DESC);

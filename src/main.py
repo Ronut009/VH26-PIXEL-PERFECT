@@ -15,6 +15,14 @@ from src.db.connection import Database, get_reader_connection
 from src.db.writer import DbWriter
 from src.engine.timer_wheel import TimerWheel
 from src.engine.timer_worker import TimerWorker
+from src.github_integration.client import GitHubConfigurationError, GitHubReadOnlyClient
+from src.github_integration.diagnosis import DiagnosisService
+from src.github_integration.ollama_provider import (
+    OllamaLocalConfigurationError,
+    OllamaLocalLimits,
+    OllamaLocalProvider,
+)
+from src.github_integration.router import create_github_router
 from src.ingest.normalize_datadog import normalize_datadog
 from src.ingest.normalize_grafana import normalize_grafana
 from src.ingest.prometheus import normalize_prometheus
@@ -30,6 +38,47 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     db = Database(settings.DATABASE_PATH)
     await db.connect()
+
+    github_client: GitHubReadOnlyClient | None = None
+    app.state.github_client = None
+    if settings.github_app_is_configured:
+        try:
+            github_client = GitHubReadOnlyClient(
+                settings.GITHUB_APP_CLIENT_ID,
+                settings.GITHUB_APP_PRIVATE_KEY.replace("\\n", "\n"),
+                timeout=settings.GITHUB_REQUEST_TIMEOUT_SECONDS,
+                api_version=settings.GITHUB_API_VERSION,
+            )
+            app.state.github_client = github_client
+        except GitHubConfigurationError as exc:
+            # GitHub is optional; a bad optional configuration must not stop
+            # the established alert-ingest pipeline from starting.
+            logger.warning("github_integration_disabled", reason=str(exc))
+
+    # The local model is optional too. A disabled or malformed Ollama setting
+    # leaves the GitHub diagnosis endpoint available for its safe fallback,
+    # while alert ingestion keeps its original startup path.
+    ollama_provider: OllamaLocalProvider | None = None
+    app.state.ollama_provider = None
+    app.state.diagnosis_service = DiagnosisService()
+    if settings.OLLAMA_ENABLED:
+        try:
+            ollama_provider = OllamaLocalProvider(
+                settings.OLLAMA_MODEL,
+                base_url=settings.OLLAMA_BASE_URL,
+                timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+                limits=OllamaLocalLimits(
+                    max_output_tokens=settings.OLLAMA_MAX_OUTPUT_TOKENS,
+                    max_patch_source_files=settings.GITHUB_PATCH_MAX_FILES,
+                    max_patch_source_file_bytes=settings.GITHUB_PATCH_MAX_FILE_BYTES,
+                    max_patch_source_bytes=settings.GITHUB_PATCH_MAX_TOTAL_BYTES,
+                    max_patch_changes=settings.GITHUB_PATCH_MAX_CHANGES,
+                ),
+            )
+            app.state.ollama_provider = ollama_provider
+            app.state.diagnosis_service = DiagnosisService(ollama_provider)
+        except (OllamaLocalConfigurationError, ValueError) as exc:
+            logger.warning("ollama_diagnosis_disabled", reason=str(exc))
 
     timer_wheel = TimerWheel()
     writer = DbWriter(timer_wheel=timer_wheel)
@@ -55,12 +104,17 @@ async def lifespan(app: FastAPI):
     finally:
         await timer_worker.stop()
         await worker.stop()
+        if github_client is not None:
+            await github_client.aclose()
+        if ollama_provider is not None:
+            await ollama_provider.aclose()
         await db.close()
         logger.info("app_stopped")
 
 
 app = FastAPI(title="Alert Fatigue Buster — Ingest Spine", lifespan=lifespan)
 app.include_router(create_sse_router(settings.DATABASE_PATH))
+app.include_router(create_github_router())
 
 
 @app.post("/v1/ingest/prometheus")

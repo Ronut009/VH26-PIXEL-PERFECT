@@ -1,0 +1,41 @@
+"""Read-only GitHub App integration primitives for PulseGraph."""
+
+from .client import (
+    BranchReference,
+    GitBlob,
+    GitHubAPIError,
+    GitHubAuthenticationError,
+    GitHubConfigurationError,
+    GitHubIntegrationError,
+    GitHubNotFoundError,
+    GitHubPayloadError,
+    GitHubRateLimitError,
+    GitHubReadOnlyClient,
+    GitHubTimeoutError,
+    GitHubTransportError,
+    GitHubTreeLimitExceeded,
+    GitTree,
+    GitTreeEntry,
+    InstallationAccessToken,
+    RepositoryMetadata,
+)
+
+__all__ = [
+    "BranchReference",
+    "GitBlob",
+    "GitHubAPIError",
+    "GitHubAuthenticationError",
+    "GitHubConfigurationError",
+    "GitHubIntegrationError",
+    "GitHubNotFoundError",
+    "GitHubPayloadError",
+    "GitHubRateLimitError",
+    "GitHubReadOnlyClient",
+    "GitHubTimeoutError",
+    "GitHubTransportError",
+    "GitHubTreeLimitExceeded",
+    "GitTree",
+    "GitTreeEntry",
+    "InstallationAccessToken",
+    "RepositoryMetadata",
+]
