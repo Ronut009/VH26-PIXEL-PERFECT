@@ -44,6 +44,20 @@ def _event_time_ms(event: NormalizedEvent) -> int:
     return int(fired_at.timestamp() * 1000)
 
 
+def _ingest_now_ms() -> int:
+    """Processing time: when *we* saw this, not when the monitor says it fired.
+
+    Every deadline in this system is fired against the wall clock by the timer
+    wheel, so it has to be computed against the wall clock too. Computed from a
+    source whose clock runs behind, a deadline lands in the past and the
+    incident fires immediately - defeating the adaptive batching that is the
+    entire product. Computed from one running ahead, delivery is postponed by
+    the drift.
+    """
+
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
 def _iso_ms(epoch_ms: int) -> str:
     """Format an epoch millisecond value the way incident timestamps are stored."""
 
@@ -84,7 +98,7 @@ def _severity(event: NormalizedEvent) -> Severity:
 
 
 def _bounded_deadline(
-    quiet_at_ms: int | None, first_alert_ms: int, now_ms: int
+    quiet_at_ms: int | None, first_ingested_ms: int, now_ms: int
 ) -> int | None:
     """Stop an ongoing storm from deferring its own notification forever.
 
@@ -99,8 +113,8 @@ def _bounded_deadline(
     if quiet_at_ms is None:
         return None
 
-    ceiling = first_alert_ms + settings.INCIDENT_MAX_BATCH_SPAN_MS
-    if first_alert_ms <= 0 or quiet_at_ms <= ceiling:
+    ceiling = first_ingested_ms + settings.INCIDENT_MAX_BATCH_SPAN_MS
+    if first_ingested_ms <= 0 or quiet_at_ms <= ceiling:
         return quiet_at_ms
     # Never schedule a deadline in the past; a breached ceiling fires next tick.
     return max(ceiling, now_ms + 1)
@@ -250,12 +264,13 @@ async def process_event(
 
     record = await lookup_incident(transaction_obj, stable_fingerprint, scope_key)
     event_time_ms = _event_time_ms(normalized_event)
+    ingest_now_ms = _ingest_now_ms()
 
     if record is None:
         state = _new_incident_state(normalized_event)
         quiet = (
             calculate_quiet_deadline(
-                [], 0.0, event_time_ms, settings.QUIET_WINDOW_MAX_MS
+                [], 0.0, ingest_now_ms, settings.QUIET_WINDOW_MAX_MS
             )
             if state != "RESOLVED"
             else {"quiet_at_ms": None, "mean_gap": 0.0, "variance": 0.0}
@@ -289,18 +304,22 @@ async def process_event(
 
     state = _next_state(record, normalized_event)
     last_gap = max(0.0, float(event_time_ms - record.last_seen_ms))
+    # The gap that feeds the EWMA is measured in event time - the source's own
+    # clock is the right measure of its own cadence, and a constant offset
+    # cancels out in a difference. Only the resulting deadline is anchored to
+    # our clock.
     quiet = (
         calculate_quiet_deadline(
             list(record.gap_history),
             last_gap,
-            event_time_ms,
+            ingest_now_ms,
             settings.QUIET_WINDOW_MAX_MS,
         )
         if state != "RESOLVED"
         else {"quiet_at_ms": None, "mean_gap": 0.0, "variance": 0.0}
     )
     quiet["quiet_at_ms"] = _bounded_deadline(
-        quiet["quiet_at_ms"], record.first_alert_ms, event_time_ms
+        quiet["quiet_at_ms"], record.first_ingested_ms, ingest_now_ms
     )
     incident_id = str(record.incident_id)
     payload = {
@@ -348,17 +367,15 @@ async def persist_and_observe(
     # Two bounds make it O(K): correlation is only meaningful over a recent
     # window, and past the most recent K neighbours the extra edges add cost
     # without adding evidence.
-    window_start = _iso_ms(
-        _event_time_ms(decision.event) - settings.CORRELATION_WINDOW_MS
-    )
+    window_start = _iso_ms(_ingest_now_ms() - settings.CORRELATION_WINDOW_MS)
     placeholders = ", ".join("?" for _ in _ACTIVE_STATES)
     async with transaction_obj.execute(
         f"""
         SELECT incident_id, stable_fingerprint
         FROM incidents
         WHERE scope_key = ? AND status IN ({placeholders})
-          AND last_alert_at >= ?
-        ORDER BY last_alert_at DESC
+          AND COALESCE(last_ingested_at, last_alert_at) >= ?
+        ORDER BY COALESCE(last_ingested_at, last_alert_at) DESC
         LIMIT ?
         """,
         (

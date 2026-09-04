@@ -47,6 +47,10 @@ async def _table_columns(conn: aiosqlite.Connection, table: str) -> set[str]:
 
 # How an incident ended, and how we found out. See schema.sql.
 _INCIDENT_COLUMN_MIGRATIONS = (
+    # Processing-time anchors. Nullable so existing rows migrate without a
+    # backfill; every read falls back to the event-time column when absent.
+    ("first_ingested_at", "TEXT"),
+    ("last_ingested_at", "TEXT"),
     ("correlation_group_id", "TEXT"),
     ("acknowledged_at", "TEXT"),
     ("acknowledged_by", "TEXT"),

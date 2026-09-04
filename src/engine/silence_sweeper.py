@@ -22,6 +22,14 @@ The silence threshold is a multiple of that incident's own predicted gap, so a
 chatty service and a quiet one are judged on their own terms rather than
 against one global timeout.
 
+*Silence is measured in processing time.* How long since an alert *arrived*,
+never how long since the monitor says it fired. Those differ by the source's
+clock drift, and using event time meant a drifted source had its live incidents
+closed on the first sweep - the alerting system silencing a real emergency with
+no attacker involved. The threshold is still derived from event-time gaps,
+which is fine because a duration is clock-independent; only the elapsed
+measurement moves.
+
 *The claim is labelled.* An inferred resolution is written with
 ``resolution_source='inferred_silence'``, never as though a human confirmed it,
 and criticals are held to a much longer threshold - closing a payment outage
@@ -145,7 +153,8 @@ class SilenceSweeper:
         placeholders = ", ".join("?" for _ in _ACTIVE_STATES)
         async with tx.execute(
             f"""
-            SELECT incident_id, severity, last_alert_at, ewma_mean_gap, ewma_variance
+            SELECT incident_id, severity, ewma_mean_gap, ewma_variance,
+                   COALESCE(last_ingested_at, last_alert_at) AS last_seen_at
             FROM incidents
             WHERE status IN ({placeholders})
             """,
@@ -164,7 +173,12 @@ class SilenceSweeper:
                 floor_ms=settings.SILENCE_RESOLVE_MIN_MS,
                 ceiling_ms=settings.SILENCE_RESOLVE_MAX_MS,
             )
-            silent_for = now_ms - _parse_ms(row["last_alert_at"])
+            # Silence is measured against *our* clock, not the monitor's.
+            # Measured as `now - fired_at`, a source whose clock runs twenty
+            # minutes behind makes every brand-new incident look like it has
+            # been quiet for twenty minutes - past the floor - so the sweeper
+            # closes a live incident and the card says "presumed resolved".
+            silent_for = now_ms - _parse_ms(row["last_seen_at"])
             if silent_for >= threshold:
                 overdue.append((row["incident_id"], silent_for, threshold))
         return overdue

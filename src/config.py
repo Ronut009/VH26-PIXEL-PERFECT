@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # one per alert.
     ROOT_CAUSE_SWEEP_INTERVAL_SECONDS: float = 2.0
 
+    # A source clock this far from ours is an operational problem worth naming:
+    # it distorts every elapsed-time judgement made about that source's alerts.
+    # Warnings are throttled per source so a drifted clock reports itself
+    # without burying the log.
+    CLOCK_SKEW_WARN_MS: int = 120_000
+    CLOCK_SKEW_WARN_INTERVAL_SECONDS: float = 300.0
+
     # Alert ingestion is a trust boundary: it is the endpoint that creates
     # incidents, and a forged `resolved` alert closes a real one. Enabled by
     # default, and with no tokens configured it refuses ingest rather than

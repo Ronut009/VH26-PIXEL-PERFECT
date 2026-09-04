@@ -117,8 +117,8 @@ async def rank_scope(
         SELECT incident_id
         FROM incidents
         WHERE scope_key = ? AND status IN ({placeholders})
-          AND last_alert_at >= ?
-        ORDER BY last_alert_at DESC
+          AND COALESCE(last_ingested_at, last_alert_at) >= ?
+        ORDER BY COALESCE(last_ingested_at, last_alert_at) DESC
         LIMIT ?
         """,
         (

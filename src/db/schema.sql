@@ -59,8 +59,18 @@ CREATE TABLE IF NOT EXISTS incidents (
     status          TEXT NOT NULL
         CHECK (status IN ('OPEN', 'ACKNOWLEDGED', 'QUIESCENT', 'RESOLVED')),
     alert_count     INTEGER NOT NULL DEFAULT 1,
+    -- EVENT TIME - what the monitor believes. Used for the ledger and for
+    -- measuring inter-arrival gaps, because a source's own clock is the right
+    -- measure of its own cadence: a constant offset cancels out in a difference.
     first_alert_at  TEXT NOT NULL,
     last_alert_at   TEXT NOT NULL,
+    -- PROCESSING TIME - when we actually saw it. Everything that decides
+    -- *elapsed time* uses these: quiet deadlines, silence detection, and the
+    -- correlation window. Scheduling must never depend on a third party's
+    -- clock; a source running twenty minutes behind would otherwise have its
+    -- live incidents auto-resolved and its batching defeated.
+    first_ingested_at TEXT,
+    last_ingested_at  TEXT,
     ewma_rate       REAL NOT NULL DEFAULT 0.0,  -- Vansh's EWMA burst signal
     quiet_at_ms     INTEGER,
     ewma_mean_gap   REAL NOT NULL DEFAULT 0.0,
@@ -94,6 +104,8 @@ CREATE INDEX IF NOT EXISTS idx_incidents_scope_stable
     ON incidents(scope_key, stable_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_incidents_quiet_deadline
     ON incidents(status, quiet_at_ms);
+CREATE INDEX IF NOT EXISTS idx_incidents_last_ingested
+    ON incidents(status, last_ingested_at);
 
 -- ─────────────────────────────────────────────────────────────
 -- edges: co-occurrence graph, owned by Anish
@@ -109,6 +121,28 @@ CREATE TABLE IF NOT EXISTS edges (
 
 CREATE INDEX IF NOT EXISTS idx_edges_dst  ON edges(dst_incident_id);
 CREATE INDEX IF NOT EXISTS idx_edges_seen ON edges(last_seen_at DESC);
+
+-- ─────────────────────────────────────────────────────────────
+-- source_clock_skew: how far each source's clock sits from ours.
+--
+-- Every alert carries two timestamps: fired_at (the monitor's clock) and
+-- ingested_at (ours). Their difference is drift, and drift used to be
+-- invisible - it silently defeated batching and auto-resolved live incidents
+-- with nothing in the logs to explain why. A monitoring system that trusts
+-- remote clocks without measuring them has a blind spot exactly where it is
+-- supposed to have vision, so the drift is now a signal in its own right.
+--
+-- Negative skew means the source is behind us; positive means it runs ahead.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS source_clock_skew (
+    source           TEXT NOT NULL,
+    scope_key        TEXT NOT NULL DEFAULT '',
+    last_skew_ms     INTEGER NOT NULL DEFAULT 0,
+    max_abs_skew_ms  INTEGER NOT NULL DEFAULT 0,
+    samples          INTEGER NOT NULL DEFAULT 0,
+    updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (source, scope_key)
+);
 
 -- ─────────────────────────────────────────────────────────────
 -- graph marginals: how often each node fires, and how many observation

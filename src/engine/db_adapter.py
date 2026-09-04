@@ -12,6 +12,7 @@ import aiosqlite
 
 from src.contracts import EngineDecision
 from src.db.hashchain import compute_row_hash, next_seq_and_prev_hash
+from src.ingest.clock_skew import record_skew
 from src.outbox.routing import priority_for
 
 
@@ -26,6 +27,10 @@ class IncidentRecord:
     # When this incident first fired, so the engine can bound how long its
     # adaptive batch window is allowed to keep deferring delivery.
     first_alert_ms: int = 0
+    # The same two moments in *our* clock. Scheduling reads these; a source
+    # whose clock drifts must not be able to move a deadline we own.
+    first_ingested_ms: int = 0
+    last_ingested_ms: int = 0
 
 
 def _iso(value: datetime) -> str:
@@ -61,6 +66,8 @@ async def lookup_incident(
             i.status,
             i.last_alert_at,
             i.first_alert_at,
+            i.first_ingested_at,
+            i.last_ingested_at,
             i.gap_history_json,
             i.alert_count,
             r.service,
@@ -111,6 +118,11 @@ async def lookup_incident(
         gap_history=gap_history,
         alert_count=int(row["alert_count"]),
         first_alert_ms=_epoch_ms(row["first_alert_at"]),
+        # Fall back to event time for rows written before the two clocks were
+        # separated, so an existing database keeps working rather than
+        # scheduling everything at the epoch.
+        first_ingested_ms=_epoch_ms(row["first_ingested_at"] or row["first_alert_at"]),
+        last_ingested_ms=_epoch_ms(row["last_ingested_at"] or row["last_alert_at"]),
     )
 
 
@@ -126,10 +138,11 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
         """
         INSERT INTO incidents (
             incident_id, scope_key, stable_fingerprint, title, summary, severity,
-            status, alert_count, first_alert_at, last_alert_at, ewma_rate,
+            status, alert_count, first_alert_at, last_alert_at,
+            first_ingested_at, last_ingested_at, ewma_rate,
             quiet_at_ms, ewma_mean_gap, ewma_variance, gap_history_json,
             route_decision, root_cause_hint, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(incident_id) DO UPDATE SET
             title = excluded.title,
             summary = COALESCE(excluded.summary, incidents.summary),
@@ -137,6 +150,7 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
             status = excluded.status,
             alert_count = excluded.alert_count,
             last_alert_at = excluded.last_alert_at,
+            last_ingested_at = excluded.last_ingested_at,
             ewma_rate = excluded.ewma_rate,
             quiet_at_ms = excluded.quiet_at_ms,
             ewma_mean_gap = excluded.ewma_mean_gap,
@@ -157,6 +171,8 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
             decision.alert_count,
             event_time,
             event_time,
+            now,
+            now,
             decision.ewma_mean_gap,
             decision.quiet_at_ms,
             decision.ewma_mean_gap,
@@ -167,6 +183,16 @@ async def persist_decision(tx: aiosqlite.Connection, decision: EngineDecision) -
             now,
             now,
         ),
+    )
+
+    # The gap between the two clocks is itself a signal. Recorded here, where
+    # both are in hand, so a drifted exporter reports itself instead of quietly
+    # distorting every elapsed-time judgement made about its alerts.
+    await record_skew(
+        tx,
+        source=event.source,
+        scope_key=decision.scope_key,
+        fired_at=event.fired_at,
     )
 
     seq, prev_hash = await next_seq_and_prev_hash(tx)

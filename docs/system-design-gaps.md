@@ -4,8 +4,8 @@ A pass over PulseGraph looking for what an experienced reviewer would attack
 next, now that the delivery and reconciliation planes are closed. Each entry
 states the gap, the concrete failure it produces, and the design that fixes it.
 
-Ordered by what gets asked first, not by effort. Gaps 1, 2 and 3 are now
-fixed; the rest stand.
+Ordered by what gets asked first, not by effort. Gaps 1-4 are now fixed;
+the rest stand.
 
 ---
 
@@ -178,7 +178,7 @@ can debug at 3am.
 topology would let the ranker discount a pair with no call path between them,
 which lift cannot do on timing evidence alone.
 
-## 4. Event time and processing time are mixed
+## 4. Event time and processing time are mixed — FIXED
 
 The quiet deadline is computed from **source** time:
 
@@ -199,25 +199,51 @@ ever delayed.
 `last_gap = max(0.0, ...)` already quietly clamps negative gaps, which is the
 symptom showing through.
 
-**This gap has since bitten for real.** The background root-cause worker was
-first written to decide whether a scope needed re-ranking by comparing
-`ranked_at` (wall clock) against `last_observed_at` (the monitor's clock). A
+**This gap bit twice before it was fixed.** The background root-cause worker
+was first written to decide whether a scope needed re-ranking by comparing
+`ranked_at` (wall clock) against `last_observed_at` (the monitor's clock); a
 source running behind would have left its scope permanently clean and root
-cause would have stopped updating silently. It was caught by a test and the
-comparison replaced with a revision counter — but the same two clocks are still
-mixed in the quiet-deadline path described above, where nothing yet catches it.
+cause would have stopped updating silently. That one is now a revision counter,
+which has no clock to disagree with — the general lesson being that when two
+clocks would otherwise be compared, the best fix is often to remove the clock
+from the question entirely.
 
-**Design.** Name the two clocks and keep them apart — this is the standard
-event-time/processing-time split:
+**This was worse than the entry described.** Writing the reproduction found a
+third instance, and it is the most damaging one in the system so far:
+`SilenceSweeper` measured silence as `wall_clock_now - last_alert_at` — our
+clock minus the monitor's. A source running twenty minutes behind therefore
+makes every **brand-new** incident look like it has already been quiet for
+twenty minutes, past the fifteen-minute floor. The sweeper closes it and the
+card reads *"presumed resolved"*.
 
-- Store both `fired_at` (event time, for the ledger and for gap statistics) and
-  `ingested_at` (processing time, which is already in the schema).
-- **Schedule on processing time.** Compute the window from event-time gaps, but
-  anchor the deadline to `ingested_at`, so scheduling never depends on a
-  third party's clock.
-- Track per-source skew (`ingested_at - fired_at`) and surface a source whose
-  skew exceeds a threshold as its own operational signal. A monitoring system
-  that silently trusts remote clocks is a monitoring system with a blind spot.
+That is the alerting system silencing a live production incident because a VM
+drifted — the same outcome as the forged-resolve attack in gap 1, with **no
+attacker required**. It is now the first test in
+[test_clock_skew.py](../tests/test_clock_skew.py).
+
+**Fixed** by naming the two clocks in the schema and keeping them apart:
+
+- `first_alert_at` / `last_alert_at` remain **event time**, and stay the basis
+  for inter-arrival gaps. A source's own clock is the right measure of its own
+  cadence — a constant offset cancels out in a difference — and recomputing
+  gaps from arrival time would let network jitter rewrite the EWMA.
+- New `first_ingested_at` / `last_ingested_at` are **processing time**, and now
+  drive every *elapsed-time* decision: the quiet deadline (fired against wall
+  clock by the timer wheel, so it must be computed against wall clock),
+  silence detection, and the correlation window. Both are nullable and every
+  read falls back to the event-time column, so an existing database keeps
+  working rather than scheduling everything at the epoch.
+
+**Drift is now also visible.** Separating the clocks stops drift *breaking*
+things; `source_clock_skew` stops it *hiding*. Skew is recorded per
+`(source, scope_key)` on the write path as a single upsert with no preceding
+read, keeping the worst offset ever seen rather than only the latest, and a
+throttled warning names the drifted source. Without it a team has a system that
+quietly behaves oddly and no way to learn which exporter slipped.
+
+Measured: a live incident under twenty minutes of drift now survives, its quiet
+deadline lands **+5s in the future** instead of ~20 minutes in the past, and the
+log names the source and the offset.
 
 ## 5. Webhook retries inflate the numbers
 

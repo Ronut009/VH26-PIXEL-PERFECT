@@ -114,6 +114,10 @@ a critical payment failure that immediately bypasses aggregation.
 | `DATABASE_PATH` | Path to the SQLite file (default `data/alerts.db`) |
 | `INGEST_AUTH_ENABLED` | Require a credential on `/v1/ingest/*` (default `true`; fails closed when no tokens are set) |
 | `INGEST_TOKENS` | `name:token[:scope]`, comma-separated. Scope is a prefix over `environment/cluster`, so a staging token cannot write production |
+| `CLOCK_SKEW_WARN_MS` | Source clock offset that earns a warning (default `120000`); drift distorts every elapsed-time judgement about that source |
+| `CLOCK_SKEW_WARN_INTERVAL_SECONDS` | Throttle between skew warnings per source (default `300`) |
+| `ROOT_CAUSE_SWEEP_INTERVAL_SECONDS` | How often root cause is re-ranked off the write path; also the debounce (default `2`) |
+| `CORRELATION_WINDOW_MS` / `CORRELATION_MAX_NEIGHBOURS` | Bounds on the correlation neighbourhood, so per-alert cost does not grow with the storm |
 | `SLACK_BOT_TOKEN` | Bot token with `chat:write` + `chat:write.public` scopes |
 | `SLACK_CHANNEL_ID` | Channel the outbox posts consolidated incidents to |
 | `PAGERDUTY_INTEGRATION_KEY` | Events API v2 integration key for critical-bypass paging |
