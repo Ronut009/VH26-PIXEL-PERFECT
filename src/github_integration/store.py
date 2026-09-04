@@ -518,24 +518,47 @@ async def replace_installation_repositories(
 
 
 async def list_repositories(tx: aiosqlite.Connection) -> list[dict[str, Any]]:
-    """Return selected repository bindings and their optional service mapping."""
+    """Return selected repository bindings and the services mapped to each.
+
+    The mapping is many-to-one: ``service`` is the primary key of
+    ``github_service_mappings``, so several monitored services can point at one
+    repository - a monorepo, or two alert sources backed by the same code.
+    Joining the mappings into this query multiplied the repository row once per
+    mapping, and the dashboard then rendered the same repository twice under
+    the same React key. The mappings are read separately and grouped here, so
+    one repository is always one row.
+    """
 
     async with tx.execute(
         """
         SELECT r.repository_id, r.installation_id, r.owner, r.name, r.full_name,
                r.default_branch, r.html_url, r.is_private, r.is_archived,
                r.is_selected, r.last_seen_commit_sha, r.updated_at,
-               i.account_login, i.status AS installation_status,
-               m.service
+               i.account_login, i.status AS installation_status
         FROM github_repositories AS r
         JOIN github_installations AS i ON i.installation_id = r.installation_id
-        LEFT JOIN github_service_mappings AS m ON m.repository_id = r.repository_id
         WHERE r.is_selected = 1
         ORDER BY r.full_name ASC
         """
     ) as cursor:
-        rows = await cursor.fetchall()
-    return [dict(row) for row in rows]
+        rows = [dict(row) for row in await cursor.fetchall()]
+
+    async with tx.execute(
+        "SELECT service, repository_id FROM github_service_mappings ORDER BY service ASC"
+    ) as cursor:
+        mapping_rows = await cursor.fetchall()
+
+    services: dict[int, list[str]] = {}
+    for mapping in mapping_rows:
+        services.setdefault(int(mapping["repository_id"]), []).append(mapping["service"])
+
+    for row in rows:
+        mapped = services.get(int(row["repository_id"]), [])
+        row["services"] = mapped
+        # Retained for callers that predate multiple mappings; it is the first
+        # service alphabetically, and `services` is the complete answer.
+        row["service"] = mapped[0] if mapped else None
+    return rows
 
 
 async def get_installation(tx: aiosqlite.Connection, installation_id: int) -> dict[str, Any]:

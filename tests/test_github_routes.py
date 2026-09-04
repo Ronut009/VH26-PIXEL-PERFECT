@@ -205,6 +205,10 @@ def test_verified_installation_webhook_persists_selected_repositories(api_client
             "updated_at": ANY,
             "account_login": "acme",
             "installation_status": "active",
+            # Many services can map to one repository, so the listing reports
+            # all of them; `service` is the first, kept for the single-mapping
+            # case this test covers.
+            "services": [],
             "service": None,
         }
     ]

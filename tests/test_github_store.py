@@ -308,6 +308,49 @@ async def test_service_mapping_requires_active_selected_repository(db_conn) -> N
 
 
 @pytest.mark.asyncio
+async def test_many_services_mapping_to_one_repository_yield_one_row(db_conn) -> None:
+    """`service` is the mappings table's primary key, not `repository_id`.
+
+    So several monitored services can point at one repository - a monorepo, or
+    simply two alert sources backed by the same code. Listing repositories with
+    a LEFT JOIN onto those mappings multiplied the repository row once per
+    mapping, and the dashboard rendered the same repository twice with the same
+    React key.
+    """
+
+    payload = _installation_payload()
+    installation_id = await _install(db_conn, payload)
+    repository_id = await upsert_repository(
+        db_conn, installation_id=installation_id, repository=payload["repositories"][0]
+    )
+
+    await set_service_mapping(db_conn, service="checkout-api", repository_id=repository_id)
+    await set_service_mapping(db_conn, service="auth-service", repository_id=repository_id)
+
+    rows = await list_repositories(db_conn)
+
+    assert len(rows) == 1, f"one repository should list once, got {len(rows)} rows"
+    assert [row["repository_id"] for row in rows] == [repository_id]
+    # Every mapping is still reported, in a stable order.
+    assert rows[0]["services"] == ["auth-service", "checkout-api"]
+
+
+@pytest.mark.asyncio
+async def test_a_repository_with_no_mapping_lists_with_none(db_conn) -> None:
+    payload = _installation_payload()
+    installation_id = await _install(db_conn, payload)
+    await upsert_repository(
+        db_conn, installation_id=installation_id, repository=payload["repositories"][0]
+    )
+
+    rows = await list_repositories(db_conn)
+
+    assert len(rows) == 1
+    assert rows[0]["services"] == []
+    assert rows[0]["service"] is None
+
+
+@pytest.mark.asyncio
 async def test_snapshot_is_pinned_to_git_objects_without_storing_content(db_conn) -> None:
     payload = _installation_payload()
     installation_id = await _install(db_conn, payload)

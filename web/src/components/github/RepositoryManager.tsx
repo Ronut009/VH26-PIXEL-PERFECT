@@ -216,9 +216,12 @@ export function RepositoryManager({
                 <div className="min-w-0">
                   <p className="font-mono text-[13px] text-text">{repository.full_name}</p>
                   <p className="mt-0.5 text-[12px] text-text-2">
-                    {repository.service ? (
+                    {repository.services.length > 0 ? (
                       <>
-                        mapped to <span className="font-mono text-text">{repository.service}</span>
+                        mapped to{" "}
+                        <span className="font-mono text-text">
+                          {repository.services.join(", ")}
+                        </span>
                       </>
                     ) : (
                       <span className="text-text-3">no service mapped</span>
@@ -235,11 +238,14 @@ export function RepositoryManager({
                   <SmallButton
                     onClick={() => {
                       setMappingFor(isMapping ? null : repository.repository_id);
-                      setServiceDraft(repository.service ?? "");
+                      // Blank, not prefilled: mapping is additive, so
+                      // prefilling an existing name invites overwriting a
+                      // mapping when the intent is usually to add another.
+                      setServiceDraft("");
                       setError(mapKey, null);
                     }}
                   >
-                    {repository.service ? "Change service" : "Map service"}
+                    {repository.services.length > 0 ? "Map another service" : "Map service"}
                   </SmallButton>
                   <SmallButton
                     onClick={() => pinSnapshot(repository.repository_id)}
