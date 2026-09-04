@@ -33,6 +33,7 @@ from src.github_integration.client import (  # noqa: E402
     GitHubIntegrationError,
     GitHubReadOnlyClient,
 )
+from src.github_integration.router import _metadata_payload  # noqa: E402
 from src.github_integration.store import (  # noqa: E402
     GitHubStoreError,
     get_installation,
@@ -42,25 +43,6 @@ from src.github_integration.store import (  # noqa: E402
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
-
-
-def _metadata_payload(repository) -> dict:
-    """The subset of repository metadata PulseGraph stores.
-
-    Source contents are deliberately not persisted; only immutable identity and
-    the default branch, so a later snapshot can pin a commit.
-    """
-
-    return {
-        "repository_id": repository.repository_id,
-        "owner": repository.owner,
-        "name": repository.name,
-        "full_name": repository.full_name,
-        "default_branch": repository.default_branch,
-        "html_url": repository.html_url,
-        "is_private": repository.is_private,
-        "is_archived": repository.is_archived,
-    }
 
 
 async def main() -> int:
@@ -158,6 +140,9 @@ async def main() -> int:
                     connection,
                     installation_id=stored_id,
                     expected_state_revision=int(record["state_revision"]),
+                    # Reuse the router's adapter rather than a second copy:
+                    # two shapes for the same persistence contract is how
+                    # they drift apart.
                     repositories=[_metadata_payload(r) for r in repositories],
                 )
                 await connection.commit()
