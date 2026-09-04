@@ -74,6 +74,33 @@ async def lifespan(app: FastAPI):
             # GitHub is optional; a bad optional configuration must not stop
             # the established alert-ingest pipeline from starting.
             logger.warning("github_integration_disabled", reason=str(exc))
+    else:
+        # Say so. Unconfigured used to be completely silent, so the only
+        # symptom was an empty Code Investigation panel with no way to tell
+        # "not set up" from "set up and broken" - and the three GitHub things
+        # here are easy to confuse: signing in to the dashboard proves who you
+        # are, GITHUB_ADMIN_TOKEN guards PulseGraph's own admin routes, and
+        # neither grants access to a single repository. Only the App does.
+        missing = [
+            name
+            for name, value in (
+                ("GITHUB_APP_CLIENT_ID", settings.GITHUB_APP_CLIENT_ID),
+                ("GITHUB_APP_PRIVATE_KEY", settings.GITHUB_APP_PRIVATE_KEY),
+                ("GITHUB_APP_SLUG", settings.GITHUB_APP_SLUG),
+                ("GITHUB_WEBHOOK_SECRET", settings.GITHUB_WEBHOOK_SECRET),
+            )
+            if not value
+        ]
+        logger.warning(
+            "github_app_not_configured",
+            missing=missing,
+            detail=(
+                "no read-only GitHub App credentials, so Code Investigation "
+                "cannot read any repository. Dashboard GitHub sign-in and "
+                "GITHUB_ADMIN_TOKEN are separate and do not grant repository "
+                "access. See docs/github-phase1-setup.md"
+            ),
+        )
 
     # The local model is optional too. A disabled or malformed Ollama setting
     # leaves the GitHub diagnosis endpoint available for its safe fallback,
