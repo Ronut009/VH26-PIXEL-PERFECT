@@ -3,6 +3,9 @@
 import math
 
 
+DEFAULT_INITIAL_WINDOW_MS = 5_000
+
+
 def _validate_gap(gap: float) -> float:
     numeric_gap = float(gap)
     if not math.isfinite(numeric_gap) or numeric_gap < 0:
@@ -22,7 +25,16 @@ def calculate_quiet_deadline(
     """
 
     gaps = [_validate_gap(gap) for gap in gap_history]
-    gaps.append(_validate_gap(last_gap))
+    validated_last_gap = _validate_gap(last_gap)
+
+    if not gaps:
+        return {
+            "quiet_at_ms": int(current_time + DEFAULT_INITIAL_WINDOW_MS),
+            "mean_gap": validated_last_gap,
+            "variance": 0.0,
+        }
+
+    gaps.append(validated_last_gap)
 
     observation_count = len(gaps)
     alpha = 2.0 / (observation_count + 1)
@@ -37,7 +49,7 @@ def calculate_quiet_deadline(
         )
 
     silence_window = mean_gap + math.sqrt(variance)
-    quiet_at_ms = int(math.ceil(current_time + silence_window))
+    quiet_at_ms = int(current_time + max(1, math.ceil(silence_window)))
 
     return {
         "quiet_at_ms": quiet_at_ms,

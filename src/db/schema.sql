@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS incidents (
     title           TEXT NOT NULL,
     summary         TEXT,                       -- Vansh fills; may be updated
     severity        TEXT NOT NULL,              -- critical | high | medium | low
-    status          TEXT NOT NULL,              -- new | active | quiet | resolved
+    status          TEXT NOT NULL
+        CHECK (status IN ('OPEN', 'ACKNOWLEDGED', 'QUIESCENT', 'RESOLVED')),
     alert_count     INTEGER NOT NULL DEFAULT 1,
     first_alert_at  TEXT NOT NULL,
     last_alert_at   TEXT NOT NULL,

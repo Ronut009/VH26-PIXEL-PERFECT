@@ -1,8 +1,16 @@
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, TypeAlias
 from uuid import UUID
 
 from pydantic import BaseModel
+
+
+IncidentState: TypeAlias = Literal[
+    "OPEN",
+    "ACKNOWLEDGED",
+    "QUIESCENT",
+    "RESOLVED",
+]
 
 
 class NormalizedEvent(BaseModel):
@@ -21,7 +29,7 @@ class NormalizedEvent(BaseModel):
 
 class IncidentDecision(BaseModel):
     incident_id: UUID
-    status: Literal["new", "active", "quiet", "resolved"]
+    status: IncidentState
     is_duplicate: bool
     severity_final: Literal["critical", "high", "medium", "low"]
     alert_count: int

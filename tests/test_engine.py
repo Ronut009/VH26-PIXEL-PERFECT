@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from uuid import UUID, uuid4
 
-from src.engine.adaptive_ewma import calculate_quiet_deadline
+from src.engine.adaptive_ewma import (
+    DEFAULT_INITIAL_WINDOW_MS,
+    calculate_quiet_deadline,
+)
 from src.engine.critical_bypass import (
     build_bypass_artifacts,
     classify_protected_critical,
@@ -107,9 +110,21 @@ def test_ewma_predicts_exact_deadline_for_a_stable_cadence() -> None:
     }
 
 
+def test_ewma_empty_gap_returns_default_window() -> None:
+    current_time = 10_000
+
+    result = calculate_quiet_deadline([], 0.0, current_time)
+
+    assert result == {
+        "quiet_at_ms": current_time + DEFAULT_INITIAL_WINDOW_MS,
+        "mean_gap": 0.0,
+        "variance": 0.0,
+    }
+
+
 def test_ewma_handles_zero_gap_and_rejects_negative_gap() -> None:
     assert calculate_quiet_deadline([0.0, 0.0], 0.0, 100) == {
-        "quiet_at_ms": 100,
+        "quiet_at_ms": 101,
         "mean_gap": 0.0,
         "variance": 0.0,
     }
