@@ -144,6 +144,7 @@ a critical payment failure that immediately bypasses aggregation.
 | `SILENCE_RESOLVE_MULTIPLIER` / `_CRITICAL_MULTIPLIER` | Silence threshold as a multiple of the incident's own EWMA gap (default `6` / `20`) |
 | `SILENCE_RESOLVE_MIN_MS` / `_MAX_MS` | Floor and ceiling on that threshold (default 15 min / 6 h) |
 | `SILENCE_SWEEP_INTERVAL_SECONDS` | How often the sweeper looks for gone-quiet incidents (default `30`) |
+| `GITHUB_APP_ID` | Numeric App ID used as the JWT issuer; preferred over the Client ID, which is not accepted on every endpoint |
 | `GITHUB_APP_CLIENT_ID` | GitHub App Client ID for the read-only GitHub integration |
 | `GITHUB_APP_PRIVATE_KEY` | GitHub App PEM private key (deployment secret) |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub App webhook verification |

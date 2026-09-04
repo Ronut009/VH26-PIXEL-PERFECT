@@ -1,4 +1,10 @@
 .env
+# Any sibling of .env is a copy of it and holds the same live credentials -
+# backups, .env.local, .env.production. Ignoring only ".env" let a backup made
+# during a repair get staged by `git add -A`; GitHub's push protection caught
+# it, which is not a control this repo should be relying on.
+.env.*
+!.env.example
 data/*.db
 data/*.db-shm
 data/*.db-wal

@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
     if settings.github_app_is_configured:
         try:
             github_client = GitHubReadOnlyClient(
-                settings.GITHUB_APP_CLIENT_ID,
+                settings.github_app_issuer,
                 settings.GITHUB_APP_PRIVATE_KEY.replace("\\n", "\n"),
                 timeout=settings.GITHUB_REQUEST_TIMEOUT_SECONDS,
                 api_version=settings.GITHUB_API_VERSION,
@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
         missing = [
             name
             for name, value in (
-                ("GITHUB_APP_CLIENT_ID", settings.GITHUB_APP_CLIENT_ID),
+                ("GITHUB_APP_ID or GITHUB_APP_CLIENT_ID", settings.github_app_issuer),
                 ("GITHUB_APP_PRIVATE_KEY", settings.GITHUB_APP_PRIVATE_KEY),
                 ("GITHUB_APP_SLUG", settings.GITHUB_APP_SLUG),
                 ("GITHUB_WEBHOOK_SECRET", settings.GITHUB_WEBHOOK_SECRET),

@@ -148,6 +148,12 @@ class Settings(BaseSettings):
     # GitHub Phase 1 uses a GitHub App with Metadata: read and Contents: read
     # only. The private key and webhook secret belong in a secret manager in
     # production; escaped newlines (\\n) are supported for local .env files.
+    # The JWT issuer. GitHub documents both the numeric App ID and the Client
+    # ID, but only the App ID is accepted everywhere - a Client ID issuer can
+    # come back as "A JSON web token could not be decoded", which reads like a
+    # broken key rather than an unrecognised issuer. Set GITHUB_APP_ID (the
+    # number on the App's General tab) and it is used in preference.
+    GITHUB_APP_ID: str = ""
     GITHUB_APP_CLIENT_ID: str = ""
     GITHUB_APP_PRIVATE_KEY: str = ""
     GITHUB_WEBHOOK_SECRET: str = ""
@@ -218,8 +224,14 @@ class Settings(BaseSettings):
                 yield name, value
 
     @property
+    def github_app_issuer(self) -> str:
+        """What to put in the App JWT's ``iss`` claim."""
+
+        return self.GITHUB_APP_ID or self.GITHUB_APP_CLIENT_ID
+
+    @property
     def github_app_is_configured(self) -> bool:
-        return bool(self.GITHUB_APP_CLIENT_ID and self.GITHUB_APP_PRIVATE_KEY)
+        return bool(self.github_app_issuer and self.GITHUB_APP_PRIVATE_KEY)
 
 
 settings = Settings()
