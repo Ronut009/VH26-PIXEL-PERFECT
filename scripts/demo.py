@@ -637,15 +637,23 @@ async def run(args: argparse.Namespace) -> int:
     print(f"backend {backend}   dashboard {dashboard}")
 
     async with httpx.AsyncClient(follow_redirects=False) as client:
+        # --reset clears and stops. It does not go on to seed: the point of
+        # resetting before a demo is to put an empty console on screen, so the
+        # audience watches it fill when the storm is fired as a separate step.
         if args.reset:
             reachable = await wait_for(client, f"{backend}/v1/health", seconds=2) is not None
-            # A refused reset has to stop here. Carrying on would fire a second
-            # storm onto the data the caller just asked to clear -- exactly the
-            # opposite of what they wanted, and it doubles every figure.
-            if not reset_pipeline_data(reachable):
-                head("Result")
+            ok = reset_pipeline_data(reachable)
+            head("Result")
+            if not ok:
                 print("\nNothing was reset, and nothing was sent.\n")
                 return 1
+            print(
+                "\nThe database is now empty. The dashboard will show zeros once you\n"
+                "refresh the tab.\n\n"
+                "When you are ready to run the demo:\n"
+                "  .venv/Scripts/python.exe scripts/demo.py\n"
+            )
+            return 0
 
         _, restart_needed = configure(backend)
         await check_services(client, backend, dashboard, args.ollama.rstrip("/"), args.model)
