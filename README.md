@@ -4,6 +4,9 @@ PulseGraph accepts monitoring webhooks, collapses exact duplicates, predicts a
 signal-driven quiet deadline, correlates active incidents through a directed
 co-occurrence graph, and emits replay-safe SSE updates for the dashboard.
 
+Fire 500 correlated alerts in 10 seconds → get one consolidated Slack message
+with full context, not 500 pings.
+
 ## Architecture
 
 ```text
@@ -26,6 +29,17 @@ SQLite WAL: incidents, raw_events, edges, delivery_intents, outbox
       +--> OutboxWorker → Slack chat.update / PagerDuty
 ```
 
+Two background asyncio tasks run alongside the HTTP server, sharing one
+SQLite writer connection guarded by a single lock (`src/db/connection.py`):
+
+- **TimerWorker** (`src/engine/timer_worker.py`) — polls an in-memory timer
+  wheel every 100ms and fires `QUIET_DEADLINE` lifecycle transitions; recovers
+  any deadlines that were in flight when the process last stopped.
+- **OutboxWorker** (`src/outbox/worker.py`) — polls the `outbox` table every
+  `OUTBOX_POLL_INTERVAL_MS` and delivers to Slack/PagerDuty with retry/backoff,
+  decoupling "decide what to send" (inside the write transaction) from
+  "actually send it" (an unreliable external call).
+
 ## Graph evidence contract
 
 **Option B was selected for the hackathon:** no schema migration. The existing
@@ -33,29 +47,89 @@ SQLite WAL: incidents, raw_events, edges, delivery_intents, outbox
 snapshot/delta payload exposes it under that exact name. This preserves the
 working SQLite schema while making correlation semantics unambiguous.
 
-## Setup
+## Project structure
+
+```text
+src/
+├── main.py            FastAPI app, lifespan (startup/shutdown), HTTP routes
+├── config.py           pydantic-settings, reads .env
+├── contracts.py         shared Pydantic models — the cross-team interface contract
+├── ingest/              normalizes vendor webhooks into NormalizedEvent
+├── db/                  SQLite schema, connection mgmt, hash chain, DbWriter
+├── engine/               IncidentEngine — dedupe, lifecycle, EWMA, critical bypass, timers
+├── graph/                CoOccurrenceGraph — decayed edges, root-cause ranking
+├── stream/               SSE broker — GET /v1/stream for the live dashboard
+├── outbox/               transactional-outbox delivery to Slack/PagerDuty
+└── utils/                fingerprinting, structlog config
+
+scripts/    init_db.py, storm_replay.py, verify_chain.py, test_webhook.py
+tests/      63 pytest tests mirroring src/'s structure
+web/        Next.js dashboard — a separate app, own package.json (see web/README.md)
+data/       gitignored — holds alerts.db (SQLite, WAL mode)
+```
+
+## Setup — backend
 
 ```bash
 pip install -r requirements.txt
 copy .env.example .env
+# fill in SLACK_BOT_TOKEN, SLACK_CHANNEL_ID, PAGERDUTY_INTEGRATION_KEY
 python scripts/init_db.py
 ```
 
-## Demo Instructions
+## Setup — dashboard
 
 ```bash
-# Start backend
+cd web
+npm install
+copy .env.local.example .env.local
+npm run dev
+```
+
+Open http://localhost:3000. The backend needs to be running for real data;
+see `web/README.md` for how the dashboard degrades without it.
+
+## Demo instructions
+
+```bash
+# Terminal 1 — start backend
 python src/main.py
 
-# Run storm replay
+# Terminal 2 — run the storm replay
 python scripts/storm_replay.py --delay 1
 
-# Verify SSE stream
+# Terminal 3 (optional) — watch the raw SSE stream
 curl -N http://localhost:8000/v1/stream
 ```
 
 The replay sends ten duplicate alerts, a DB → API → Pod correlated burst, and
 a critical payment failure that immediately bypasses aggregation.
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_PATH` | Path to the SQLite file (default `data/alerts.db`) |
+| `SLACK_BOT_TOKEN` | Bot token with `chat:write` + `chat:write.public` scopes |
+| `SLACK_CHANNEL_ID` | Channel the outbox posts consolidated incidents to |
+| `PAGERDUTY_INTEGRATION_KEY` | Events API v2 integration key for critical-bypass paging |
+| `LOG_LEVEL` | structlog level (default `INFO`) |
+| `ENVIRONMENT` | `dev` / etc., informational |
+| `OUTBOX_POLL_INTERVAL_MS` | How often the OutboxWorker polls for pending deliveries (default `500`) |
+| `OUTBOX_MAX_ATTEMPTS` | Attempts before an outbox row is marked `dead` (default `5`) |
+
+Real values live in `.env` (gitignored) — see `.env.example` for the template.
+The dashboard has its own `web/.env.local`, with just `NEXT_PUBLIC_API_BASE`
+pointing at the backend.
+
+## API reference
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/ingest/prometheus` | Ingest a Prometheus AlertManager webhook payload |
+| `GET` | `/v1/incidents/recent?since=<iso8601>` | Poll-friendly incident list, consumed by the dashboard |
+| `GET` | `/v1/stream[?after=<streamId>]` | Server-Sent Events — snapshot + live deltas (`incident.upsert`, `graph.edge.upsert`, `card.update`, `metrics.update`) |
+| `GET` | `/v1/health` | Liveness check — executes `SELECT 1` against the writer connection |
 
 ## Verification
 
@@ -63,5 +137,23 @@ a critical payment failure that immediately bypasses aggregation.
 pytest tests/ -q --tb=short
 python scripts/verify_chain.py
 ```
+
+`verify_chain.py` walks `raw_events` in sequence order, recomputes each row's
+hash from the previous row's hash plus the canonical event+decision payload,
+and confirms every stored hash matches — proving the audit ledger wasn't
+tampered with.
+
+## Ownership
+
+| Slice | Owner | Files |
+|---|---|---|
+| Ingest HTTP server, DbWriter, Outbox Worker | Yash | `src/main.py` (routes), `src/ingest/`, `src/db/`, `src/outbox/`, `src/utils/` |
+| IncidentEngine (dedupe, EWMA, lifecycle, timer wheel) | Vansh | `src/engine/` |
+| CoOccurrenceGraph, SSE publisher | Anish | `src/graph/`, `src/stream/` |
+| Next.js dashboard | Ronit | `web/` |
+
+`src/contracts.py` is the shared interface every slice depends on — changes
+there ripple across the whole team; see its `EngineDecision`/`NormalizedEvent`
+models before touching cross-slice code.
 
 The dashboard application is maintained independently in [web/](web/).
