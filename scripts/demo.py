@@ -341,6 +341,43 @@ async def seed(client: httpx.AsyncClient, backend: str) -> int:
 
 # ─────────────────────────────────────────────────────────── verification ──
 
+async def read_snapshot_event(
+    client: httpx.AsyncClient, url: str, timeout: float = 25.0
+) -> tuple[int, dict[str, Any] | None]:
+    """Read the first `snapshot` frame from an SSE endpoint.
+
+    Returns (status, payload). The payload is None when the endpoint refused
+    the connection or closed before a snapshot arrived. Works against either
+    the dashboard proxy or the backend, so the same check survives the
+    dashboard requiring a session this script does not have.
+    """
+
+    async with client.stream("GET", url, timeout=timeout) as response:
+        if response.status_code != 200:
+            return response.status_code, None
+        buffer = ""
+        async for chunk in response.aiter_text():
+            buffer += chunk
+            if "event: snapshot" not in buffer:
+                if len(buffer) > 400_000:
+                    return response.status_code, None
+                continue
+            tail = buffer.split("event: snapshot", 1)[1]
+            if "\n\n" not in tail:
+                if len(buffer) > 400_000:
+                    return response.status_code, None
+                continue
+            for row in tail.split("\n\n", 1)[0].splitlines():
+                if row.startswith("data: "):
+                    try:
+                        return response.status_code, json.loads(row[6:])
+                    except ValueError:
+                        return response.status_code, None
+            return response.status_code, None
+    return 0, None
+
+
+
 async def verify_pipeline(
     client: httpx.AsyncClient, backend: str, dashboard: str, seeded: bool
 ) -> list[dict[str, Any]]:
@@ -419,43 +456,39 @@ async def verify_pipeline(
     # the only place correlation edges are published, so this doubles as the
     # check that the graph the Correlations view draws is not empty.
     snapshot: dict[str, Any] | None = None
+    source = "the dashboard"
     try:
-        async with client.stream("GET", f"{dashboard}/api/stream", timeout=25.0) as response:
-            if response.status_code == 401:
-                # Same as above: the stream carries incident data, so it is
-                # gated behind sign-in and this script has no session.
-                line(
-                    OK,
-                    "SSE stream requires sign-in (401)",
-                    "The browser subscribes with its session cookie. Verified below\n"
-                    "against the backend's own /v1/stream instead.",
-                )
-            elif response.status_code != 200:
-                fail("SSE stream through the dashboard", f"HTTP {response.status_code}")
-            else:
-                buffer = ""
-                async for chunk in response.aiter_text():
-                    buffer += chunk
-                    if "event: snapshot" in buffer and "\n\n" in buffer.split("event: snapshot", 1)[1]:
-                        block = buffer.split("event: snapshot", 1)[1].split("\n\n", 1)[0]
-                        for row in block.splitlines():
-                            if row.startswith("data: "):
-                                try:
-                                    snapshot = json.loads(row[6:])
-                                except ValueError:
-                                    snapshot = None
-                        break
-                    if len(buffer) > 400_000:
-                        break
+        status, snapshot = await read_snapshot_event(client, f"{dashboard}/api/stream")
+        if status == 401:
+            # The stream carries incident data, so it is gated behind sign-in
+            # and this script has no session. Read the same snapshot from the
+            # backend instead: correlation edges are published nowhere else,
+            # and skipping it would leave the Correlations view unverified.
+            line(
+                OK,
+                "SSE stream requires sign-in (401)",
+                "The browser subscribes with its session cookie. Re-reading the same\n"
+                "snapshot from the backend's own /v1/stream to check the graph.",
+            )
+            source = "the backend"
+            status, snapshot = await read_snapshot_event(client, f"{backend}/v1/stream")
+            if status != 200:
+                fail("Backend SSE stream reachable", f"HTTP {status}")
+        elif status != 200:
+            fail("SSE stream through the dashboard", f"HTTP {status}")
     except (httpx.HTTPError, ValueError) as exc:
-        fail("SSE stream through the dashboard", str(exc)[:200])
+        fail("SSE stream reachable", str(exc)[:200])
 
     if snapshot is None:
-        line(WARN, "No snapshot event seen", "The stream is open; it emits a snapshot when state changes.")
+        fail(
+            "SSE snapshot received",
+            f"No snapshot event arrived from {source}. The Correlations view is\n"
+            "populated from this payload, so it could not be verified.",
+        )
     else:
         streamed = len(snapshot.get("incidents") or [])
         edges = snapshot.get("edges") or []
-        line(OK, f"SSE snapshot received through /api/stream: {streamed} incidents, {len(edges)} edges")
+        line(OK, f"SSE snapshot received from {source}: {streamed} incidents, {len(edges)} edges")
         if edges:
             heaviest = max(edges, key=lambda e: float(e.get("decayed_joint_weight", 0) or 0))
             line(
