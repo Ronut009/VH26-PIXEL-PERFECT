@@ -56,7 +56,7 @@ def test_decay_math_halves_evidence_at_one_half_life() -> None:
 
 
 @pytest.mark.asyncio
-async def test_storm_replay_creates_directed_edge_and_ranks_leader(db_conn) -> None:
+async def test_storm_replay_creates_a_directed_edge(db_conn) -> None:
     writer = DbWriter()
     started_at = datetime(2026, 9, 4, tzinfo=timezone.utc)
 
@@ -67,15 +67,38 @@ async def test_storm_replay_creates_directed_edge_and_ranks_leader(db_conn) -> N
 
     async with db_conn.execute("SELECT * FROM edges") as cursor:
         edges = await cursor.fetchall()
-    hint = await rank_root_cause(db_conn)
 
     assert len(edges) == 1
     assert edges[0]["src_incident_id"] == source_result["incident_id"]
     assert edges[0]["dst_incident_id"] == target_result["incident_id"]
     assert edges[0]["weight"] == pytest.approx(1.0)
+
+    # A single co-occurrence is not yet a root cause. This test previously
+    # asserted a hint here; the ranker now withholds one until the pair has
+    # been seen together more than once, because one co-occurrence is a
+    # coincidence and a wrong root cause costs more than no root cause.
+    assert await rank_root_cause(db_conn) is None
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_cascade_eventually_names_its_leader(db_conn) -> None:
+    """Evidence that accumulates should be enough to speak, and to say so."""
+
+    writer = DbWriter()
+    started_at = datetime(2026, 9, 4, tzinfo=timezone.utc)
+
+    source_result = await writer.process_event(db_conn, _event("GatewayLatency", started_at))
+    for index in range(1, 5):
+        await writer.process_event(
+            db_conn,
+            _event("DatabasePoolExhausted", started_at + timedelta(seconds=index)),
+        )
+
+    hint = await rank_root_cause(db_conn)
+
     assert hint is not None
     assert source_result["incident_id"] in hint
-    assert "outbound_decayed_joint_weight=" in hint
+    assert "confidence=" in hint
 
 
 @pytest.mark.asyncio

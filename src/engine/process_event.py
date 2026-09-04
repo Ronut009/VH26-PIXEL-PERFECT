@@ -18,7 +18,7 @@ from .db_adapter import IncidentRecord, lookup_incident, persist_decision
 from .dedupe import generate_fingerprint, is_exact_duplicate
 from .incident_machine import transition_state
 from src.graph.observe_incident import observe_incident
-from src.graph.root_cause_ranker import rank_root_cause
+from src.graph.root_cause_ranker import score_root_cause
 from src.graph.storm_grouping import (
     assign_group,
     redirect_member_deliveries,
@@ -330,6 +330,25 @@ async def process_event(
     )
 
 
+async def _describe_root_cause(
+    transaction_obj: aiosqlite.Connection, verdict
+) -> str:
+    """Render a verdict for a human, not for a log parser.
+
+    The hint is shown verbatim on the Slack card, and a bare UUID tells a
+    responder nothing at 3am. The incident's title is what they recognise; the
+    confidence is what lets them decide how much to trust it.
+    """
+
+    async with transaction_obj.execute(
+        "SELECT title FROM incidents WHERE incident_id = ?", (verdict.incident_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    label = row["title"] if row and row["title"] else verdict.incident_id
+    return f"{label} (confidence {verdict.confidence:.0%})"
+
+
 async def persist_and_observe(
     transaction_obj: aiosqlite.Connection, decision: EngineDecision
 ) -> EngineDecision:
@@ -377,8 +396,11 @@ async def persist_and_observe(
     # O(edges) per alert and answered the wrong question - "the loudest thing
     # anywhere" rather than "what led the incidents related to this one".
     candidates = tuple(row["incident_id"] for row in rows)
-    decision.root_cause_hint = await rank_root_cause(
-        transaction_obj, candidate_ids=candidates
+    verdict = await score_root_cause(transaction_obj, candidate_ids=candidates)
+    decision.root_cause_hint = (
+        await _describe_root_cause(transaction_obj, verdict)
+        if verdict is not None
+        else None
     )
     if decision.root_cause_hint is not None:
         await transaction_obj.execute(

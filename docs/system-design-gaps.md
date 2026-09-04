@@ -4,7 +4,7 @@ A pass over PulseGraph looking for what an experienced reviewer would attack
 next, now that the delivery and reconciliation planes are closed. Each entry
 states the gap, the concrete failure it produces, and the design that fixes it.
 
-Ordered by what gets asked first, not by effort. Gaps 1 and 2 are now
+Ordered by what gets asked first, not by effort. Gaps 1, 2 and 3 are now
 fixed; the rest stand.
 
 ---
@@ -95,7 +95,7 @@ bounded now, so it no longer scales with the storm, but root cause is an
 enrichment rather than a transactional invariant and belongs on a debounced
 background pass. That is the remaining half of this gap.
 
-## 3. Correlation is temporal only, and will produce confident nonsense
+## 3. Correlation is temporal only, and will produce confident nonsense — FIXED
 
 Two services that break at the same time get an edge, whether or not they have
 anything to do with each other. During a broad event — a bad deploy, an AZ
@@ -104,22 +104,58 @@ and `rank_root_cause` confidently names whichever incident happened to fire
 first. A responder who is told the wrong root cause once will stop reading the
 field entirely, which is worse than not having it.
 
-**Design.** Co-occurrence should be evidence, not the whole model. Combine it
-with a **structural prior** — what *could* cause what:
+**First, a correction to this entry as originally written.** It claimed the
+GitHub integration gives dependency topology "for free" via the
+`service → repository` mapping. It does not. That table is only
+`service → repository_id`; there is no manifest parsing anywhere in
+`src/github_integration/`. A real dependency graph means fetching and parsing
+package.json / requirements.txt / go.mod across ecosystems and resolving
+dependencies to repositories to services — a subsystem, and one that is dead
+weight whenever the GitHub App is not configured. It is still worth building,
+but it was not the cheapest or the largest win available.
 
-- Service dependency topology, from a service mesh, tracing spans, or a
-  declared manifest. An edge between two services with no call path is almost
-  certainly coincidence.
-- **The GitHub integration is already a topology source.** Repository
-  dependency manifests and the existing `service → repository` mapping give a
-  build-time dependency graph for free, from a component that is already built.
-- Score = decayed co-occurrence × structural plausibility. Report a
-  **confidence**, and say nothing when confidence is low. "No clear root cause"
-  is a trustworthy answer; a wrong one is not.
+**The larger win was already latent in the code.** `edge_decay.DecayedWeights`
+carries three fields — `joint`, `source`, `target` — and `increment_weights`
+maintains all three, but `observe_incident` passed the joint count for all
+three, so the marginals carried no information. `edges.weight` was therefore a
+raw decayed co-occurrence count with **no normalisation by how often each
+incident fires**. That is precisely why a broad event produced confident
+nonsense: two services that each fire constantly co-occur constantly *by
+chance*, and a raw count cannot tell that apart from a causal pair.
+
+**Fixed** with two changes in
+[root_cause_ranker.py](../src/graph/root_cause_ranker.py):
+
+- **Lead versus follow.** The old ranker summed outbound weight, so a
+  chronically unhealthy service — which co-occurs with everything, and follows
+  as often as it leads — won outright. Ranking now uses *net* lead
+  (outbound − inbound), so a node that does both in equal measure scores zero
+  however loud it is. `graph_node_stats` and `graph_scope_stats` supply the
+  marginals for a **lift** term (`P(a,b) / P(a)P(b)`) that divides chance out
+  of each edge; when those are unavailable lift falls back to 1.0 and the model
+  degrades to directional weighting rather than failing.
+- **Permission to say nothing.** The ranker previously always answered.
+  Confidence is now separation of the leader from the runner-up, scaled by how
+  much evidence exists, and below `MIN_CONFIDENCE` the result is `None` and the
+  card stays silent. A single co-occurrence no longer names a cause at all.
+
+One subtlety the tests caught: separation as a pure *ratio* is scale-free, so
+when every node leads and follows equally the nets collapse to floating-point
+dust and the ratio between two specks reads as a landslide. A `MIN_DOMINANCE`
+floor asks the absolute question instead — of everything this node did, how
+much of it was net leading — and that is what makes the bad-deploy case return
+nothing.
+
+The hint a responder reads is now the incident's **title and a confidence
+percentage** rather than a UUID and a raw weight.
 
 This is also the honest answer to "is there ML in this?" — there does not need
 to be, and a prior plus decayed counts is more defensible than a model nobody
 can debug at 3am.
+
+**Still outstanding:** the structural prior itself. Manifest-derived service
+topology would let the ranker discount a pair with no call path between them,
+which lift cannot do on timing evidence alone.
 
 ## 4. Event time and processing time are mixed
 

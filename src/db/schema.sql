@@ -111,6 +111,35 @@ CREATE INDEX IF NOT EXISTS idx_edges_dst  ON edges(dst_incident_id);
 CREATE INDEX IF NOT EXISTS idx_edges_seen ON edges(last_seen_at DESC);
 
 -- ─────────────────────────────────────────────────────────────
+-- graph marginals: how often each node fires, and how many observation
+-- rounds a scope has seen.
+--
+-- `edges.weight` is a raw decayed co-occurrence count, and a raw count cannot
+-- tell "these two are related" from "these two are both always firing". Two
+-- chronically noisy services co-occur constantly by chance alone. Without the
+-- marginals there is no denominator to divide that chance out by, so the
+-- ranker treats coincidence and causation as the same evidence.
+--
+-- These are the P(a) and P(b) terms of lift = P(a,b) / (P(a)P(b)); `rounds` is
+-- the N that turns decayed counts into probabilities.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS graph_node_stats (
+    incident_id       TEXT PRIMARY KEY,
+    scope_key         TEXT NOT NULL DEFAULT '',
+    observations      REAL NOT NULL DEFAULT 0.0,   -- decayed rounds this node appeared in
+    last_observed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_node_stats_scope
+    ON graph_node_stats(scope_key);
+
+CREATE TABLE IF NOT EXISTS graph_scope_stats (
+    scope_key         TEXT PRIMARY KEY,
+    rounds            REAL NOT NULL DEFAULT 0.0,   -- decayed observation rounds in scope
+    last_observed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+-- ─────────────────────────────────────────────────────────────
 -- outbox: durable delivery intents. Your Outbox Worker drains this.
 -- Written inside the same transaction as raw_events + incidents.
 -- ─────────────────────────────────────────────────────────────
