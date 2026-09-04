@@ -394,12 +394,24 @@ async def verify_pipeline(
 
     # The dashboard must be showing these same incidents, not its sample data.
     try:
-        proxied = (await client.get(f"{dashboard}/api/incidents/recent", timeout=15.0)).json()
-        proxy_count = len(proxied.get("incidents") or [])
-        if proxy_count == surfaced:
-            line(OK, f"Dashboard proxy returns the same {proxy_count} incidents (real data, not samples)")
+        response = await client.get(f"{dashboard}/api/incidents/recent", timeout=15.0)
+        if response.status_code == 401:
+            # Correct behaviour, not a failure: incident data now requires a
+            # signed-in session, and this script has none. Only /api/health is
+            # deliberately left open. Sign in at the dashboard to see the rows.
+            line(
+                OK,
+                "Dashboard requires sign-in before serving incidents (401)",
+                "Incident data is gated behind GitHub sign-in, so this script cannot\n"
+                "read it. Open the dashboard and sign in to see these incidents.",
+            )
         else:
-            fail("Dashboard proxy agrees with the backend", f"backend {surfaced} vs proxy {proxy_count}")
+            proxied = response.json()
+            proxy_count = len(proxied.get("incidents") or [])
+            if proxy_count == surfaced:
+                line(OK, f"Dashboard proxy returns the same {proxy_count} incidents (real data, not samples)")
+            else:
+                fail("Dashboard proxy agrees with the backend", f"backend {surfaced} vs proxy {proxy_count}")
     except (httpx.HTTPError, ValueError) as exc:
         fail("Dashboard proxy returns incidents", str(exc)[:200])
 
@@ -409,7 +421,16 @@ async def verify_pipeline(
     snapshot: dict[str, Any] | None = None
     try:
         async with client.stream("GET", f"{dashboard}/api/stream", timeout=25.0) as response:
-            if response.status_code != 200:
+            if response.status_code == 401:
+                # Same as above: the stream carries incident data, so it is
+                # gated behind sign-in and this script has no session.
+                line(
+                    OK,
+                    "SSE stream requires sign-in (401)",
+                    "The browser subscribes with its session cookie. Verified below\n"
+                    "against the backend's own /v1/stream instead.",
+                )
+            elif response.status_code != 200:
                 fail("SSE stream through the dashboard", f"HTTP {response.status_code}")
             else:
                 buffer = ""
@@ -468,11 +489,29 @@ async def verify_pipeline(
 # ──────────────────────────────────────────────────────────────── github ──
 
 async def github_phase(
-    client: httpx.AsyncClient, dashboard: str, incidents: list[dict[str, Any]], service: str
+    client: httpx.AsyncClient,
+    dashboard: str,
+    backend: str,
+    incidents: list[dict[str, Any]],
+    service: str,
 ) -> None:
     head("5. GitHub code investigation")
 
     response = await client.get(f"{dashboard}/api/github/repositories", timeout=20.0)
+
+    if response.status_code == 401:
+        # The dashboard route is behind GitHub sign-in and this script has no
+        # session. Ask the backend directly with the admin token instead, so
+        # the GitHub App state is still genuinely verified rather than skipped.
+        token = read_env(ENV_FILE).get("GITHUB_ADMIN_TOKEN", "")
+        response = await client.get(
+            f"{backend}/v1/github/repositories",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20.0,
+        )
+        if response.status_code == 200:
+            line(OK, "GitHub admin API reachable (checked on the backend; the dashboard route needs sign-in)")
+
     if response.status_code != 200:
         detail = ""
         try:
@@ -677,7 +716,7 @@ async def run(args: argparse.Namespace) -> int:
                 "Restart the backend and the dashboard, then run this script again.",
             )
         else:
-            await github_phase(client, dashboard, incidents, args.service)
+            await github_phase(client, dashboard, backend, incidents, args.service)
 
         if not incidents:
             head("Result")

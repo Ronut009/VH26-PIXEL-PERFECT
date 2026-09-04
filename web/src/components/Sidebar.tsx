@@ -3,7 +3,6 @@
 export type ViewKey =
   | "overview"
   | "incidents"
-  | "alerts"
   | "correlations"
   | "deliveries"
   | "audit"
@@ -35,14 +34,6 @@ function IconList() {
   return (
     <svg {...S}>
       <path d="M5 4h9M5 8h9M5 12h9M2.5 4h.01M2.5 8h.01M2.5 12h.01" />
-    </svg>
-  );
-}
-function IconBell() {
-  return (
-    <svg {...S}>
-      <path d="M8 2a4 4 0 0 0-4 4c0 3-1 4-1 4h10s-1-1-1-4a4 4 0 0 0-4-4Z" />
-      <path d="M6.8 12.5a1.5 1.5 0 0 0 2.4 0" />
     </svg>
   );
 }
@@ -90,7 +81,6 @@ function IconCog() {
 const NAV: { key: ViewKey; label: string; icon: React.ReactNode }[] = [
   { key: "overview", label: "Overview", icon: <IconGrid /> },
   { key: "incidents", label: "Incidents", icon: <IconList /> },
-  { key: "alerts", label: "Alerts", icon: <IconBell /> },
   { key: "correlations", label: "Correlations", icon: <IconGraph /> },
   { key: "deliveries", label: "Deliveries", icon: <IconSend /> },
   { key: "audit", label: "Audit Ledger", icon: <IconLedger /> },

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { MobileNav, Sidebar, type ViewKey } from "@/components/Sidebar";
 import { TopHeader } from "@/components/TopHeader";
 import {
@@ -26,7 +27,6 @@ import type { DashboardUser, Incident, Lifecycle, Severity } from "@/lib/types";
 const TITLES: Record<ViewKey, string> = {
   overview: "Overview",
   incidents: "Incidents",
-  alerts: "Alerts",
   correlations: "Correlations",
   deliveries: "Deliveries",
   audit: "Audit Ledger",
@@ -47,8 +47,11 @@ export function DashboardApp({ user }: { user: DashboardUser }) {
   const [severities, setSeverities] = useState<readonly Severity[]>([]);
   const [sort, setSort] = useState<SortMode>("urgency");
 
-  // Sample data appears only when the backend is unreachable, and is labelled.
-  const isSample = state === "offline" && incidents.length === 0;
+  // Sample data is opt-in via ?demo=1 and never substitutes automatically.
+  // It used to appear whenever the backend was unreachable, which made an
+  // empty database look like a console still holding 347 alerts, and made
+  // "demo.py --reset" look broken when it had in fact worked correctly.
+  const isSample = useSearchParams().get("demo") === "1";
   const shown = isSample ? DEMO_INCIDENTS : incidents;
   const shownEdges = isSample ? DEMO_EDGES : edges;
   const connected = state === "live" || state === "polling";
@@ -109,14 +112,13 @@ export function DashboardApp({ user }: { user: DashboardUser }) {
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto max-w-[1400px] px-4 py-5 sm:px-6 sm:py-6">
               {isSample && (
-                <p className="mb-5 rounded-md border border-edge bg-[#FFFBEB] px-4 py-2.5 text-[12px] text-[#B45309]">
-                  Backend unreachable. Showing sample incidents so the console stays inspectable.
-                  Every figure below is derived from these records.
-                  {backend.action ? ` ${backend.action}` : ""}
+                <p className="mb-5 rounded-md border border-[#FDE68A] bg-[#FFFBEB] px-4 py-2.5 text-[12px] text-[#B45309]">
+                  Sample data (<span className="font-mono">?demo=1</span>). These figures are a
+                  fixture, not your database. Drop the query parameter to see real pipeline state.
                 </p>
               )}
 
-              {!isSample && backend.state === "degraded" && backend.message && (
+              {backend.state === "degraded" && backend.message && (
                 <p className="mb-5 rounded-md border border-[#FDE68A] bg-[#FFFBEB] px-4 py-2.5 text-[12px] text-[#B45309]">
                   {backend.message}
                   {backend.action ? ` ${backend.action}` : ""}
@@ -205,16 +207,15 @@ export function DashboardApp({ user }: { user: DashboardUser }) {
                 </div>
               )}
 
-              {(view === "incidents" || view === "alerts") && (
+              {view === "incidents" && (
                 <div className="space-y-5">
                   <div>
                     <h1 className="text-[20px] font-semibold tracking-tight text-text">
                       {TITLES[view]}
                     </h1>
                     <p className="mt-1 text-[13px] text-text-2">
-                      {view === "incidents"
-                        ? "Deduplicated and correlated. Select a row to open root cause analysis."
-                        : "Every consolidated signal, newest first. Alerts are grouped into the incidents below."}
+                      Every alert the pipeline received, deduplicated and correlated into the
+                      incidents below. Select a row to open root cause analysis.
                     </p>
                   </div>
                   <IncidentsTable
