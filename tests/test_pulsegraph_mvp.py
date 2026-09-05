@@ -19,6 +19,11 @@ import src.main as main
 from src.contracts import NormalizedEvent
 from src.db.writer import DbWriter
 
+# Ingest authenticates now (gap 1): a forged `resolved` alert could otherwise
+# close a real incident from anywhere on the internet. conftest configures a
+# wildcard-scoped credential for the suite; senders present it like Alertmanager.
+from tests.conftest import INGEST_HEADERS
+
 
 SCHEMA_PATH = Path(__file__).parent.parent / "src" / "db" / "schema.sql"
 
@@ -101,7 +106,7 @@ def test_mvp_accepts_prometheus_datadog_and_grafana(api_client) -> None:
         ("/v1/ingest/datadog", datadog),
         ("/v1/ingest/grafana", grafana),
     ):
-        response = api_client.post(path, json=payload)
+        response = api_client.post(path, json=payload, headers=INGEST_HEADERS)
         assert response.status_code == 200, response.text
         assert response.json()["ingested"] == 1
 
@@ -143,6 +148,25 @@ async def test_mvp_critical_alert_bypasses_batching(database) -> None:
 
 def test_mvp_rejects_invalid_provider_payloads(api_client) -> None:
     """Bad webhook data is rejected instead of corrupting the incident pipeline."""
-    assert api_client.post("/v1/ingest/prometheus", json={"alerts": [{}]}).status_code == 400
-    assert api_client.post("/v1/ingest/datadog", json={"event": {"title": "missing fields"}}).status_code == 422
-    assert api_client.post("/v1/ingest/grafana", json={"alerts": []}).status_code == 422
+    assert (
+        api_client.post(
+            "/v1/ingest/prometheus", json={"alerts": [{}]}, headers=INGEST_HEADERS
+        ).status_code
+        == 400
+    )
+    assert (
+        api_client.post(
+            "/v1/ingest/datadog",
+            json={"event": {"title": "missing fields"}},
+            headers=INGEST_HEADERS,
+        ).status_code
+        == 422
+    )
+    assert (
+        api_client.post(
+            "/v1/ingest/grafana", json={"alerts": []}, headers=INGEST_HEADERS
+        ).status_code
+        == 422
+    )
+    # And an unauthenticated caller gets nowhere near the payload validator.
+    assert api_client.post("/v1/ingest/prometheus", json={"alerts": [{}]}).status_code == 401

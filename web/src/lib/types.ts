@@ -151,7 +151,15 @@ export interface GithubRepository {
   updated_at: string;
   account_login: string;
   installation_status: string;
-  /** The monitored service mapped to this repository, if any. */
+  /**
+   * Every monitored service mapped to this repository, alphabetically.
+   *
+   * Many-to-one: `service` is the primary key of the mappings table, so a
+   * monorepo - or two alert sources backed by the same code - maps several
+   * services onto one repository.
+   */
+  services: string[];
+  /** First of `services`, kept for the common single-mapping case. */
   service: string | null;
 }
 

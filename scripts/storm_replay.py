@@ -5,13 +5,44 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timezone
+import os
+from pathlib import Path
 import sys
 from typing import Any
 
 import httpx
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.config import settings  # noqa: E402
+
 DEFAULT_INGEST_URL = "http://127.0.0.1:8000/v1/ingest/prometheus"
 GRAPH_STEP_DELAY_SECONDS = 0.5
+
+
+def ingest_headers() -> dict[str, str]:
+    """Credential for the ingest endpoint.
+
+    Ingest authenticates by default, so a script that posts alerts must present
+    a token exactly as Alertmanager would. Taken from INGEST_TOKEN, else the
+    first entry of the backend's own INGEST_TOKENS, so a working .env needs no
+    extra setup here.
+    """
+
+    token = os.environ.get("INGEST_TOKEN", "").strip()
+    if not token:
+        first = settings.INGEST_TOKENS.split(",")[0].strip()
+        parts = first.split(":")
+        token = parts[1].strip() if len(parts) >= 2 else ""
+    if not token:
+        print(
+            "  ! No ingest token found. Set INGEST_TOKEN, or INGEST_TOKENS in .env.",
+            file=sys.stderr,
+        )
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -56,7 +87,7 @@ def _prometheus_payload(
 async def _send(
     client: httpx.AsyncClient, ingest_url: str, payload: dict[str, Any]
 ) -> None:
-    response = await client.post(ingest_url, json=payload)
+    response = await client.post(ingest_url, json=payload, headers=ingest_headers())
     response.raise_for_status()
 
 

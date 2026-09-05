@@ -1,7 +1,7 @@
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.config import settings
+from src.outbox.failure_policy import RateLimited
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -22,15 +22,15 @@ _ACTION_MAP = {
 }
 
 
-class PagerDutyRateLimited(Exception):
-    def __init__(self, retry_after: float):
-        self.retry_after = retry_after
-        super().__init__(f"PagerDuty rate limited, retry after {retry_after}s")
-
-
 def _build_event_payload(payload: dict) -> dict:
+    summary = payload.get("title", "Incident")
+    # A failover page has to be self-explanatory: the responder is being woken
+    # by PagerDuty for something that would normally have been a Slack card.
+    if payload.get("failover_from"):
+        summary = f"[{payload['failover_from']} unreachable] {summary}"
+
     return {
-        "summary": payload.get("title", "Incident"),
+        "summary": summary,
         "source": payload.get("service", "unknown"),
         "severity": _SEVERITY_MAP.get(payload.get("severity", "critical"), "critical"),
         "timestamp": payload.get("timestamp"),
@@ -38,17 +38,32 @@ def _build_event_payload(payload: dict) -> dict:
             "summary": payload.get("summary"),
             "alert_count": payload.get("alert_count"),
             "root_cause_hint": payload.get("root_cause_hint"),
+            "state": payload.get("state"),
+            "failover_from": payload.get("failover_from"),
+            "dashboard_incident_id": payload.get("incident_id"),
         },
     }
 
 
-@retry(
-    retry=retry_if_exception_type((PagerDutyRateLimited, httpx.TransportError)),
-    wait=wait_exponential(multiplier=1, min=1, max=30),
-    stop=stop_after_attempt(5),
-    reraise=True,
-)
+async def probe() -> None:
+    """Liveness check for the Events API that enqueues nothing.
+
+    A deliberately invalid body gets a 400 from a healthy PagerDuty, which is
+    all the breaker needs: the endpoint answered. Only a transport failure or a
+    5xx means the channel is actually down. ``raise_for_status`` is not used
+    here for that exact reason.
+    """
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.post(PD_EVENTS_URL, json={})
+        if response.status_code >= 500:
+            response.raise_for_status()
+
+
 async def send(action: str, payload: dict, external_ref: str | None) -> str:
+    # PagerDuty's own dedup_key is the incident id, so a failover trigger for an
+    # incident that critical-bypass already paged collapses into the existing
+    # PagerDuty incident instead of paging a second time.
     dedup_key = external_ref or payload.get("incident_id")
     event_action = _ACTION_MAP.get(action)
     if event_action is None:
@@ -67,8 +82,7 @@ async def send(action: str, payload: dict, external_ref: str | None) -> str:
         response = await client.post(PD_EVENTS_URL, json=body)
 
         if response.status_code == 429:
-            retry_after = float(response.headers.get("Retry-After", "1"))
-            raise PagerDutyRateLimited(retry_after)
+            raise RateLimited(float(response.headers.get("Retry-After", "1")))
 
         response.raise_for_status()
         data = response.json()

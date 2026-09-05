@@ -94,6 +94,46 @@ function ConnectionState({
           action={<RetryButton onClick={onRetry} />}
         />
       );
+    case "app_missing":
+      return (
+        <StatusNote
+          tone="warn"
+          title="No GitHub App created yet"
+          body={readiness.message}
+          action={
+            <div className="mt-3 space-y-3">
+              <ol className="list-decimal space-y-1.5 pl-4 text-[12px] text-text-2">
+                <li>
+                  Go to{" "}
+                  <a
+                    href="https://github.com/settings/apps/new"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-brand underline"
+                  >
+                    GitHub → Settings → Developer settings → New GitHub App
+                  </a>
+                  .
+                </li>
+                <li>
+                  Permissions: Repository → <strong>Metadata: Read-only</strong> and{" "}
+                  <strong>Contents: Read-only</strong>. Nothing else. PulseGraph never writes.
+                </li>
+                <li>
+                  Put the App&rsquo;s Client ID, generated private key, slug and webhook secret in
+                  the backend&rsquo;s <span className="font-mono">.env</span> as{" "}
+                  <span className="font-mono">GITHUB_APP_CLIENT_ID</span>,{" "}
+                  <span className="font-mono">GITHUB_APP_PRIVATE_KEY</span>,{" "}
+                  <span className="font-mono">GITHUB_APP_SLUG</span> and{" "}
+                  <span className="font-mono">GITHUB_WEBHOOK_SECRET</span>.
+                </li>
+                <li>Restart the backend, then use Check again.</li>
+              </ol>
+              <RetryButton onClick={onRetry} />
+            </div>
+          }
+        />
+      );
     case "unauthorized":
       return (
         <StatusNote

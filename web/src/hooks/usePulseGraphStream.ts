@@ -63,16 +63,26 @@ export function usePulseGraphStream() {
    * deleted, or had aged past the snapshot's row limit, stayed on screen for
    * the life of the tab -- the counts only ever grew.
    */
-  const replaceIncidents = useCallback((rows: Record<string, unknown>[]) => {
-    setIncidents(() => {
-      const next = new Map<string, Incident>();
-      for (const row of rows) {
-        const incident = normalizeIncident(row);
-        if (incident.incident_id) next.set(incident.incident_id, incident);
-      }
-      return next;
-    });
-  }, []);
+  /**
+   * Accepts raw rows or already-normalised incidents, because both callers are
+   * legitimate: the SSE snapshot arrives as untyped JSON, while the REST
+   * fallback has been through `normalizeIncident` already. Normalising twice is
+   * safe - it reads the same snake_case keys a normalised `Incident` carries -
+   * so this widens the type rather than forcing one caller to un-normalise.
+   */
+  const replaceIncidents = useCallback(
+    (rows: readonly (Record<string, unknown> | Incident)[]) => {
+      setIncidents(() => {
+        const next = new Map<string, Incident>();
+        for (const row of rows) {
+          const incident = normalizeIncident(row as Record<string, unknown>);
+          if (incident.incident_id) next.set(incident.incident_id, incident);
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   const replaceEdges = useCallback((rows: Record<string, unknown>[]) => {
     setEdges(() => {

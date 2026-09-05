@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import aiosqlite
 
+from src.config import settings
 from src.contracts import CardChange, DeliveryIntent, EngineDecision, NormalizedEvent, Severity
 
 from .adaptive_ewma import calculate_quiet_deadline
@@ -17,7 +18,11 @@ from .db_adapter import IncidentRecord, lookup_incident, persist_decision
 from .dedupe import generate_fingerprint, is_exact_duplicate
 from .incident_machine import transition_state
 from src.graph.observe_incident import observe_incident
-from src.graph.root_cause_ranker import rank_root_cause
+from src.graph.storm_grouping import (
+    assign_group,
+    redirect_member_deliveries,
+    refresh_group_for_member,
+)
 
 
 _SEVERITY_MAP: dict[str, Severity] = {
@@ -39,10 +44,42 @@ def _event_time_ms(event: NormalizedEvent) -> int:
     return int(fired_at.timestamp() * 1000)
 
 
-def _scope_key(event: NormalizedEvent) -> str:
+def _ingest_now_ms() -> int:
+    """Processing time: when *we* saw this, not when the monitor says it fired.
+
+    Every deadline in this system is fired against the wall clock by the timer
+    wheel, so it has to be computed against the wall clock too. Computed from a
+    source whose clock runs behind, a deadline lands in the past and the
+    incident fires immediately - defeating the adaptive batching that is the
+    entire product. Computed from one running ahead, delivery is postponed by
+    the drift.
+    """
+
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _iso_ms(epoch_ms: int) -> str:
+    """Format an epoch millisecond value the way incident timestamps are stored."""
+
+    moment = datetime.fromtimestamp(max(0, epoch_ms) / 1000, tz=timezone.utc)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+
+
+def scope_key_for(event: NormalizedEvent) -> str:
+    """The isolation boundary an event belongs to.
+
+    Public because ingest authorisation has to answer "may this source write
+    this scope" using exactly the scope the engine will later dedupe within.
+    Two different derivations here would be a security hole, not a style issue.
+    """
+
     environment = event.labels.get("environment", "default")
     cluster = event.labels.get("cluster", event.labels.get("namespace", "default"))
     return f"{environment}/{cluster}"
+
+
+# Retained for internal callers written against the original private name.
+_scope_key = scope_key_for
 
 
 def _event_payload(event: NormalizedEvent, scope_key: str) -> dict[str, Any]:
@@ -58,6 +95,29 @@ def _event_payload(event: NormalizedEvent, scope_key: str) -> dict[str, Any]:
 
 def _severity(event: NormalizedEvent) -> Severity:
     return _SEVERITY_MAP.get(event.severity_raw.lower(), "medium")
+
+
+def _bounded_deadline(
+    quiet_at_ms: int | None, first_ingested_ms: int, now_ms: int
+) -> int | None:
+    """Stop an ongoing storm from deferring its own notification forever.
+
+    Each new alert recomputes the quiet deadline as ``now + window``, so a
+    service that keeps flapping keeps pushing its own delivery into the future
+    and the incident is never announced at all. The adaptive window still
+    decides *when* inside the budget; this decides that there is a budget.
+    Once the ceiling is reached the incident fires with whatever it has, and
+    later alerts keep updating the same card.
+    """
+
+    if quiet_at_ms is None:
+        return None
+
+    ceiling = first_ingested_ms + settings.INCIDENT_MAX_BATCH_SPAN_MS
+    if first_ingested_ms <= 0 or quiet_at_ms <= ceiling:
+        return quiet_at_ms
+    # Never schedule a deadline in the past; a breached ceiling fires next tick.
+    return max(ceiling, now_ms + 1)
 
 
 def _payload_json(
@@ -109,6 +169,8 @@ def _decision(
     is_critical_bypass: bool = False,
     bypass_reason: str | None = None,
     delivery_intents: list[DeliveryIntent] | None = None,
+    reopen_count: int = 0,
+    is_flapping: bool = False,
 ) -> EngineDecision:
     return EngineDecision(
         event=event,
@@ -136,6 +198,8 @@ def _decision(
             bypass_reason=bypass_reason,
         ),
         delivery_intents=delivery_intents or [],
+        reopen_count=reopen_count,
+        is_flapping=is_flapping,
     )
 
 
@@ -204,11 +268,14 @@ async def process_event(
 
     record = await lookup_incident(transaction_obj, stable_fingerprint, scope_key)
     event_time_ms = _event_time_ms(normalized_event)
+    ingest_now_ms = _ingest_now_ms()
 
     if record is None:
         state = _new_incident_state(normalized_event)
         quiet = (
-            calculate_quiet_deadline([], 0.0, event_time_ms)
+            calculate_quiet_deadline(
+                [], 0.0, ingest_now_ms, settings.QUIET_WINDOW_MAX_MS
+            )
             if state != "RESOLVED"
             else {"quiet_at_ms": None, "mean_gap": 0.0, "variance": 0.0}
         )
@@ -241,12 +308,44 @@ async def process_event(
 
     state = _next_state(record, normalized_event)
     last_gap = max(0.0, float(event_time_ms - record.last_seen_ms))
+    # The gap that feeds the EWMA is measured in event time - the source's own
+    # clock is the right measure of its own cadence, and a constant offset
+    # cancels out in a difference. Only the resulting deadline is anchored to
+    # our clock.
     quiet = (
-        calculate_quiet_deadline(list(record.gap_history), last_gap, event_time_ms)
+        calculate_quiet_deadline(
+            list(record.gap_history),
+            last_gap,
+            ingest_now_ms,
+            settings.QUIET_WINDOW_MAX_MS,
+        )
         if state != "RESOLVED"
         else {"quiet_at_ms": None, "mean_gap": 0.0, "variance": 0.0}
     )
+    quiet["quiet_at_ms"] = _bounded_deadline(
+        quiet["quiet_at_ms"], record.first_ingested_ms, ingest_now_ms
+    )
     incident_id = str(record.incident_id)
+
+    # A reopen is a RESOLVED incident firing again. Counting them is what
+    # separates "this came back" from "this alert is broken": the sweeper
+    # closes a quiet incident and the engine reopens it on the next alert, and
+    # a badly thresholded signal cycles between the two forever.
+    reopened = record.state == "RESOLVED" and normalized_event.status != "resolved"
+    reopen_count = record.reopen_count + (1 if reopened else 0)
+    is_flapping = (
+        settings.FLAP_DAMPING_ENABLED
+        and reopen_count >= settings.FLAP_REOPEN_THRESHOLD
+    )
+
+    # While flapping, collapse the repeats into a periodic update. The early
+    # transitions still notify - they are genuinely new information - and the
+    # incident keeps being recorded either way; only the card stops repeating.
+    notify = True
+    if is_flapping:
+        since_notified = ingest_now_ms - record.last_flap_notified_ms
+        notify = since_notified >= settings.FLAP_DIGEST_INTERVAL_SECONDS * 1000
+
     payload = {
         "incident_id": incident_id,
         "state": state,
@@ -256,6 +355,10 @@ async def process_event(
     changes = ["DUPLICATE_COALESCED", "QUIET_DEADLINE_UPDATED"]
     if state != record.state:
         changes.append(f"STATE_{record.state}_TO_{state}")
+    if reopened:
+        changes.append("REOPENED")
+    if is_flapping:
+        changes.append("FLAPPING")
     return _decision(
         event=normalized_event,
         incident_id=incident_id,
@@ -269,7 +372,13 @@ async def process_event(
         gap_history=[*record.gap_history, last_gap],
         card_changes=changes,
         alert_count=record.alert_count + 1,
-        delivery_intents=[_slack_intent(normalized_event, incident_id, "update", payload)],
+        reopen_count=reopen_count,
+        is_flapping=is_flapping,
+        delivery_intents=(
+            [_slack_intent(normalized_event, incident_id, "update", payload)]
+            if notify
+            else []
+        ),
     )
 
 
@@ -282,26 +391,67 @@ async def persist_and_observe(
     if decision.is_critical_bypass:
         return decision
 
+    # Correlate against a bounded neighbourhood, not every active incident in
+    # the scope. This ran per alert and did an edge upsert per related
+    # incident, so with A active incidents the work was O(A) per alert and the
+    # edge set grew O(A**2) - all inside the write transaction holding the
+    # single SQLite writer lock that ingest queues behind. The system got
+    # slowest during exactly the storm it exists to absorb.
+    #
+    # Two bounds make it O(K): correlation is only meaningful over a recent
+    # window, and past the most recent K neighbours the extra edges add cost
+    # without adding evidence.
+    window_start = _iso_ms(_ingest_now_ms() - settings.CORRELATION_WINDOW_MS)
     placeholders = ", ".join("?" for _ in _ACTIVE_STATES)
     async with transaction_obj.execute(
         f"""
-        SELECT stable_fingerprint
+        SELECT incident_id, stable_fingerprint
         FROM incidents
         WHERE scope_key = ? AND status IN ({placeholders})
+          AND COALESCE(last_ingested_at, last_alert_at) >= ?
+        ORDER BY COALESCE(last_ingested_at, last_alert_at) DESC
+        LIMIT ?
         """,
-        (decision.scope_key, *_ACTIVE_STATES),
+        (
+            decision.scope_key,
+            *_ACTIVE_STATES,
+            window_start,
+            settings.CORRELATION_MAX_NEIGHBOURS,
+        ),
     ) as cursor:
         rows = await cursor.fetchall()
     fingerprints = tuple(row["stable_fingerprint"] for row in rows)
     await observe_incident(transaction_obj, decision.incident_id, fingerprints)
 
-    decision.root_cause_hint = await rank_root_cause(transaction_obj)
-    if decision.root_cause_hint is not None:
-        await transaction_obj.execute(
-            "UPDATE incidents SET root_cause_hint = ? WHERE incident_id = ?",
-            (decision.root_cause_hint, str(decision.incident_id)),
+    # Ranking deliberately does not happen here. A root cause is an enrichment,
+    # not a transactional invariant: nothing about durably recording this alert
+    # or delivering its notification depends on knowing what caused it. The
+    # observation round above marks the scope dirty and RootCauseWorker ranks it
+    # off the write path, debounced - so a storm of alerts costs a handful of
+    # ranking passes instead of one per alert. Delivery payloads render from
+    # live incident state at send time, so a hint that lands after a card was
+    # queued still reaches it.
+
+    # Correlation stops at annotation unless something acts on it. If this
+    # incident is now strongly tied to others, they become one storm and only
+    # the anchor keeps a card - so a three-service cascade pages once, not
+    # three times, and the consequences stop competing with their own cause.
+    incident_id = str(decision.incident_id)
+    assignment = await assign_group(transaction_obj, incident_id, decision.scope_key)
+    if assignment is None:
+        # No new correlation, but this incident's own state just changed, so a
+        # storm it already belongs to needs its derived facts recomputed.
+        assignment = await refresh_group_for_member(transaction_obj, incident_id)
+    if (
+        assignment is not None
+        and assignment.is_multi_member
+        and assignment.anchor_incident_id != incident_id
+    ):
+        await redirect_member_deliveries(
+            transaction_obj, incident_id, assignment.anchor_incident_id
         )
+
     return decision
 
 
-__all__ = ["persist_and_observe", "process_event"]
+__all__ = ["persist_and_observe", "process_event", "scope_key_for"]

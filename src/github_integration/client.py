@@ -262,6 +262,26 @@ class GitHubReadOnlyClient:
             repository_selection=repository_selection,
         )
 
+    async def get_app_installation(self, installation_id: int) -> Mapping[str, Any]:
+        """Read one installation's metadata using the App JWT.
+
+        Installation state normally arrives by webhook, which needs a publicly
+        reachable URL. That is a reasonable production assumption and a poor
+        first-run one: until a tunnel exists, a correctly installed App cannot
+        be connected at all, and the failure looks identical to a broken
+        install. This is the same object the `installation` webhook carries, so
+        it can seed the connection directly and let webhooks keep it current.
+
+        Read-only: a plain GET, with no side effect on GitHub.
+        """
+
+        installation_id = self._validate_positive_int(installation_id, "installation_id")
+        return await self._request_json(
+            "GET",
+            f"/app/installations/{installation_id}",
+            headers=self._app_auth_headers(),
+        )
+
     # GitHub documentation uses both names in different contexts.  Keeping the
     # alias avoids consumers guessing whether "access" is part of the name.
     create_installation_access_token = create_installation_token

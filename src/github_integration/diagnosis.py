@@ -15,6 +15,8 @@ fallback instead of an overconfident diagnosis.
 from __future__ import annotations
 
 from typing import Literal, Protocol, runtime_checkable
+
+from src.utils.logging import get_logger
 from uuid import UUID
 import re
 
@@ -39,6 +41,9 @@ MAX_LABELS = 64
 
 _GIT_OBJECT_ID = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 _PROVIDER_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+logger = get_logger(__name__)
 
 
 class DiagnosisContractError(ValueError):
@@ -477,7 +482,18 @@ class DiagnosisService:
 
         try:
             result = await self._provider.diagnose(request)
-        except Exception:
+        except Exception as exc:
+            # The response stays deliberately opaque - a provider exception can
+            # carry vendor internals or fragments of the prompt and source. But
+            # discarding it entirely left operators with "provider_unavailable"
+            # and no way to tell a stopped Ollama from a model that answered
+            # with unusable JSON. Log it; do not return it.
+            logger.warning(
+                "diagnosis_provider_failed",
+                provider=self._provider_name,
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+            )
             return safe_fallback("provider_unavailable")
 
         if not isinstance(result, DiagnosisResult):
@@ -489,7 +505,16 @@ class DiagnosisService:
             # that the rest of PulseGraph trusts.
             validated_result = DiagnosisResult.model_validate(result.model_dump())
             self._validate_grounding(request, validated_result)
-        except (DiagnosisContractError, ValidationError, TypeError, ValueError):
+        except (DiagnosisContractError, ValidationError, TypeError, ValueError) as exc:
+            # Distinct from the above: the provider answered, and the answer was
+            # rejected. Usually an ungrounded citation - a file path or line
+            # range the model invented rather than copied from the excerpts.
+            logger.warning(
+                "diagnosis_result_rejected",
+                provider=self._provider_name,
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+            )
             return safe_fallback("invalid_provider_result")
 
         # The service, not an untrusted provider response, identifies the
