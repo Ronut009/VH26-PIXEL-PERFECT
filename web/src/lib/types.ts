@@ -105,6 +105,19 @@ export interface HealthReport {
   error?: string;
 }
 
+// GET /v1/health/self is the self-check report: a verdict plus the signals it
+// was derived from. Only the fields the dashboard actually reads are declared.
+
+export interface SelfHealthReport {
+  verdict: "ok" | "degraded" | "unhealthy";
+  reasons?: string[];
+  signals?: {
+    workers?: Record<string, boolean>;
+    outbox_pending?: number;
+    outbox_dead?: number;
+  };
+}
+
 // ── Same-origin API errors ───────────────────────────────────────────────
 // Every /api/* route handler normalizes failures to this envelope so the
 // client has something typed to branch on instead of parsing prose.
@@ -161,6 +174,23 @@ export interface GithubRepository {
   services: string[];
   /** First of `services`, kept for the common single-mapping case. */
   service: string | null;
+  /**
+   * The most recently pinned snapshot, or null when nothing is pinned.
+   *
+   * A diagnosis reads this commit, not the branch head - so a repository that
+   * has been pushed to since it was pinned is serving older code, and the row
+   * has to be able to say which commit that is.
+   */
+  pinned_commit_sha: string | null;
+  pinned_file_count: number | null;
+  pinned_at: string | null;
+  /**
+   * Where the default branch pointed at the last installation sync. Compared
+   * against `pinned_commit_sha` this is what says the repository has been
+   * pushed to since it was pinned; null until a sync has run.
+   */
+  head_commit_sha: string | null;
+  head_checked_at: string | null;
 }
 
 export interface GithubInstallationSync {

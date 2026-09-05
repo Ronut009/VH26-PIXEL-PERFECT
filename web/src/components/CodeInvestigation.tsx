@@ -5,7 +5,7 @@ import { DiagnosisPanel } from "./github/DiagnosisPanel";
 import { RepositoryManager } from "./github/RepositoryManager";
 import { repositoryForService, type GithubReadiness } from "@/hooks/useGithubReadiness";
 import { serviceOf } from "@/lib/theme";
-import type { Incident } from "@/lib/types";
+import type { GithubRepository, Incident } from "@/lib/types";
 
 /**
  * What the read-only design actually guarantees, stated where an operator can
@@ -67,6 +67,27 @@ function RetryButton({ onClick }: { onClick: () => void }) {
       Check again
     </button>
   );
+}
+
+/**
+ * "1 repository readable, 4 services mapped".
+ *
+ * The mapped count is of *services*, not repositories. It used to count
+ * repositories holding at least one mapping, which reads as a service count
+ * and undercounts every time a monorepo - or one demo repo standing in for a
+ * whole stack - backs several services.
+ */
+function connectionSummary(repositories: GithubRepository[]): string {
+  const mapped = new Set(
+    repositories.flatMap((repository) =>
+      repository.services.map((service) => service.toLowerCase()),
+    ),
+  ).size;
+  const repositoryPart = `${repositories.length} ${
+    repositories.length === 1 ? "repository is" : "repositories are"
+  } readable`;
+  const servicePart = `${mapped} ${mapped === 1 ? "service is" : "services are"} mapped to one`;
+  return `${repositoryPart}, and ${servicePart}.`;
 }
 
 function ConnectionState({
@@ -176,11 +197,7 @@ function ConnectionState({
         <StatusNote
           tone="ok"
           title="Connected"
-          body={`${readiness.repositories.length} ${
-            readiness.repositories.length === 1 ? "repository is" : "repositories are"
-          } readable, and ${
-            readiness.repositories.filter((repository) => repository.service).length
-          } mapped to a monitored service.`}
+          body={connectionSummary(readiness.repositories)}
         />
       );
   }

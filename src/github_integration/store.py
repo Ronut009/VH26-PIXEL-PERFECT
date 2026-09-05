@@ -534,6 +534,7 @@ async def list_repositories(tx: aiosqlite.Connection) -> list[dict[str, Any]]:
         SELECT r.repository_id, r.installation_id, r.owner, r.name, r.full_name,
                r.default_branch, r.html_url, r.is_private, r.is_archived,
                r.is_selected, r.last_seen_commit_sha, r.updated_at,
+               r.head_commit_sha, r.head_checked_at,
                i.account_login, i.status AS installation_status
         FROM github_repositories AS r
         JOIN github_installations AS i ON i.installation_id = r.installation_id
@@ -548,17 +549,68 @@ async def list_repositories(tx: aiosqlite.Connection) -> list[dict[str, Any]]:
     ) as cursor:
         mapping_rows = await cursor.fetchall()
 
+    # The most recently pinned snapshot per repository. Without it the listing
+    # cannot say what an analysis would actually read, so a repository that has
+    # moved on several commits since it was pinned looks identical to one that
+    # is current - which reads as the dashboard failing to update.
+    # ROW_NUMBER rather than MAX(created_at): two snapshots pinned in the same
+    # millisecond would otherwise both survive the join.
+    async with tx.execute(
+        """
+        SELECT repository_id, commit_sha, file_count, created_at
+        FROM (
+            SELECT repository_id, commit_sha, file_count, created_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY repository_id
+                       ORDER BY created_at DESC, rowid DESC
+                   ) AS rank
+            FROM github_snapshots
+        )
+        WHERE rank = 1
+        """
+    ) as cursor:
+        snapshot_rows = await cursor.fetchall()
+
+    pinned = {int(row["repository_id"]): row for row in snapshot_rows}
+
     services: dict[int, list[str]] = {}
     for mapping in mapping_rows:
         services.setdefault(int(mapping["repository_id"]), []).append(mapping["service"])
 
     for row in rows:
-        mapped = services.get(int(row["repository_id"]), [])
+        repository_id = int(row["repository_id"])
+        mapped = services.get(repository_id, [])
         row["services"] = mapped
         # Retained for callers that predate multiple mappings; it is the first
         # service alphabetically, and `services` is the complete answer.
         row["service"] = mapped[0] if mapped else None
+
+        snapshot = pinned.get(repository_id)
+        row["pinned_commit_sha"] = snapshot["commit_sha"] if snapshot else None
+        row["pinned_file_count"] = int(snapshot["file_count"]) if snapshot else None
+        row["pinned_at"] = snapshot["created_at"] if snapshot else None
     return rows
+
+
+async def record_branch_head(
+    tx: aiosqlite.Connection, *, repository_id: int, commit_sha: str
+) -> None:
+    """Note where the default branch points, without touching the pin.
+
+    Read-only bookkeeping: it changes nothing about which commit an analysis
+    reads. It exists so the dashboard can say that the pinned commit is behind,
+    instead of a pushed-to repository looking identical to a current one.
+    """
+
+    await tx.execute(
+        """
+        UPDATE github_repositories
+        SET head_commit_sha = ?,
+            head_checked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE repository_id = ?
+        """,
+        (commit_sha, repository_id),
+    )
 
 
 async def get_installation(tx: aiosqlite.Connection, installation_id: int) -> dict[str, Any]:

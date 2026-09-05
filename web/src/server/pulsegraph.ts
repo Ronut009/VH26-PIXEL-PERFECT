@@ -30,6 +30,15 @@ const DEFAULT_API_BASE = "http://127.0.0.1:8000";
 const REQUEST_TIMEOUT_MS = 15_000;
 
 /**
+ * Deadline for the two routes that drive the local model - a grounded
+ * diagnosis and a patch preview. Both routinely take over a minute, and the
+ * backend caps its own provider call at OLLAMA_TIMEOUT_SECONDS (120s). The
+ * default 15s is right for every other route and far too short for these, so
+ * they pass this explicitly rather than raising it for everybody.
+ */
+export const LOCAL_MODEL_TIMEOUT_MS = 150_000;
+
+/**
  * Machine-readable failure codes the UI switches on.
  *
  * Declared once in `@/lib/types` (which the browser may import) and re-exported
@@ -82,6 +91,8 @@ export interface BackendRequest {
    * <GITHUB_ADMIN_TOKEN>`. Public endpoints must not send it.
    */
   admin?: boolean;
+  /** Overrides the default deadline for slow endpoints. */
+  timeoutMs?: number;
 }
 
 /**
@@ -100,6 +111,7 @@ export async function callBackend({
   query,
   body,
   admin = false,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 }: BackendRequest): Promise<Response> {
   const url = new URL(path, apiBase());
   for (const [key, value] of Object.entries(query ?? {})) {
@@ -120,7 +132,7 @@ export async function callBackend({
     headers.set("authorization", `Bearer ${token}`);
   }
 
-  let init: RequestInit = { method, headers, cache: "no-store", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
+  let init: RequestInit = { method, headers, cache: "no-store", signal: AbortSignal.timeout(timeoutMs) };
   if (body !== undefined) {
     headers.set("content-type", "application/json");
     init = { ...init, body: JSON.stringify(body) };
@@ -129,13 +141,19 @@ export async function callBackend({
   let upstream: globalThis.Response;
   try {
     upstream = await fetch(url, init);
-  } catch {
-    // Deliberately not surfacing the cause: it can contain the backend host
-    // and internal network detail that the browser has no business seeing.
+  } catch (cause) {
+    // A deadline and a dead socket both land here, and telling the user to
+    // start a backend that is already running sends them debugging the wrong
+    // thing. Only the abort reason is surfaced - never the cause itself, which
+    // carries the backend host and internal network detail the browser has no
+    // business seeing.
+    const timedOut = cause instanceof Error && cause.name === "TimeoutError";
     return errorResponse(
-      502,
+      timedOut ? 504 : 502,
       "backend_unreachable",
-      "The PulseGraph backend did not respond. Start it with `uvicorn src.main:app --reload` and check PULSEGRAPH_API_BASE.",
+      timedOut
+        ? `The backend did not answer within ${Math.round(timeoutMs / 1000)}s. It is running, but this request outlived its deadline.`
+        : "The PulseGraph backend did not respond. Start it with `uvicorn src.main:app --reload` and check PULSEGRAPH_API_BASE.",
     );
   }
 

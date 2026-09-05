@@ -12,7 +12,7 @@ import aiosqlite
 from src.config import settings
 from src.contracts import CardChange, DeliveryIntent, EngineDecision, NormalizedEvent, Severity
 
-from .adaptive_ewma import calculate_quiet_deadline
+from .adaptive_ewma import calculate_quiet_deadline, retain_recent_gaps
 from .critical_bypass import classify_protected_critical
 from .db_adapter import IncidentRecord, lookup_incident, persist_decision
 from .dedupe import generate_fingerprint, is_exact_duplicate
@@ -152,6 +152,27 @@ def _slack_intent(
     )
 
 
+def _pagerduty_resolve_intent(
+    event: NormalizedEvent, incident_id: str, payload: dict[str, Any]
+) -> DeliveryIntent:
+    """Close the page this incident opened.
+
+    Only the critical bypass ever sends a PagerDuty trigger, and nothing used
+    to send the matching resolve: every update and resolution went to Slack
+    alone. A page therefore stayed open after the incident closed, and could
+    only be cleared by hand in PagerDuty - on exactly the alerts that matter
+    most. The dedup key is the incident id, so this resolves the same page the
+    trigger opened.
+    """
+
+    return DeliveryIntent(
+        channel="pagerduty",
+        action="resolve",  # type: ignore[arg-type]
+        idempotency_key=f"card:{event.event_id}:{incident_id}:pagerduty-resolve",
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _decision(
     *,
     event: NormalizedEvent,
@@ -230,7 +251,14 @@ async def process_event(
     stable_fingerprint = generate_fingerprint(event_payload)
     bypass = classify_protected_critical(normalized_event)
 
-    if bypass.should_bypass:
+    # A resolution is never an emergency to page about, so it must not take the
+    # bypass. It used to: the branch below fires on any classified event, so a
+    # `resolved` alert for a critical incident minted a *second* incident in
+    # ACKNOWLEDGED and paged again, while the original stayed open forever with
+    # no resolve ever delivered to PagerDuty. Falling through sends it to
+    # lookup_incident, which finds the open incident and transitions it to
+    # RESOLVED - the path every non-critical incident already took.
+    if bypass.should_bypass and normalized_event.status != "resolved":
         incident_id = str(uuid4())
         payload = {
             "incident_id": incident_id,
@@ -369,17 +397,54 @@ async def process_event(
         quiet_at_ms=quiet["quiet_at_ms"],
         mean_gap=float(quiet["mean_gap"]),
         variance=float(quiet["variance"]),
-        gap_history=[*record.gap_history, last_gap],
+        gap_history=retain_recent_gaps(
+            [*record.gap_history, last_gap], settings.GAP_HISTORY_MAX
+        ),
         card_changes=changes,
         alert_count=record.alert_count + 1,
         reopen_count=reopen_count,
         is_flapping=is_flapping,
-        delivery_intents=(
-            [_slack_intent(normalized_event, incident_id, "update", payload)]
-            if notify
-            else []
+        delivery_intents=_resolution_intents(
+            normalized_event,
+            incident_id,
+            payload,
+            state=state,
+            previous_state=record.state,
+            route_decision=record.route_decision,
+            notify=notify,
         ),
     )
+
+
+def _resolution_intents(
+    event: NormalizedEvent,
+    incident_id: str,
+    payload: dict[str, Any],
+    *,
+    state: str,
+    previous_state: str,
+    route_decision: str | None,
+    notify: bool,
+) -> list[DeliveryIntent]:
+    """Card updates, plus the PagerDuty resolve when a page needs closing.
+
+    The PagerDuty resolve is deliberately *not* gated on ``notify``: flap
+    damping exists to stop a card repeating, and silently withholding the
+    close of a real page is not the same tradeoff at all. It is emitted only on
+    the transition into RESOLVED, so a resolution arriving twice does not send
+    two resolves.
+    """
+
+    intents: list[DeliveryIntent] = []
+    if notify:
+        intents.append(_slack_intent(event, incident_id, "update", payload))
+    if (
+        state == "RESOLVED"
+        and previous_state != "RESOLVED"
+        and route_decision == "pagerduty"
+    ):
+        intents.append(_pagerduty_resolve_intent(event, incident_id, payload))
+    return intents
 
 
 async def persist_and_observe(

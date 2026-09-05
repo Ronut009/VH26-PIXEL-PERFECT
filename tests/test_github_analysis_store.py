@@ -342,3 +342,73 @@ async def test_rejects_invalid_context_digest_without_writing(db_conn) -> None:
 
     async with db_conn.execute("SELECT COUNT(*) AS count FROM github_incident_analyses") as cursor:
         assert (await cursor.fetchone())["count"] == 0
+
+
+async def _append_lifecycle_events(connection: aiosqlite.Connection) -> None:
+    """The rows PulseGraph writes about itself as an incident winds down."""
+
+    for seq, status, message in (
+        (2, "firing", f"Adaptive silence deadline reached for incident {INCIDENT_ID}"),
+        (3, "resolved", "No alerts for 924s, past this incident's 900s silence threshold."),
+    ):
+        await connection.execute(
+            """
+            INSERT INTO raw_events (
+                event_id, seq, fingerprint, stable_fingerprint, scope_key, source,
+                service, alertname, severity_raw, status, labels_json, message,
+                fired_at, raw_payload, prev_hash, row_hash, incident_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"00000000-0000-4000-8000-00000000000{seq}",
+                seq,
+                "fingerprint",
+                "stable-checkout",
+                "production:payments-east",
+                # PulseGraph's own lifecycle machinery, never an ingest source.
+                "generic",
+                "checkout-api",
+                "CheckoutErrorRateHigh",
+                "critical",
+                status,
+                "{}",
+                message,
+                "2026-09-04T10:20:00Z",
+                "{}",
+                "0" * 64,
+                str(seq) * 64,
+                str(INCIDENT_ID),
+            ),
+        )
+    await connection.commit()
+
+
+@pytest.mark.asyncio
+async def test_context_ignores_pulsegraph_own_lifecycle_events(db_conn) -> None:
+    """A resolved incident must still describe the outage, not its own closure.
+
+    The newest rows on a resolved incident are the quiet-deadline trigger and
+    the sweeper's resolution note. Fed those as the incident message, the model
+    diagnoses PulseGraph's bookkeeping - correctly concluding nothing is wrong
+    and proposing no fix, which fails the grounded contract and reaches the
+    operator as an unexplained fallback.
+    """
+
+    await _append_lifecycle_events(db_conn)
+
+    context = await load_incident_context(db_conn, incident_id=INCIDENT_ID)
+
+    assert context.message == "checkout 5xx rate rose after deployment"
+    assert context.status == "firing"
+
+
+@pytest.mark.asyncio
+async def test_context_falls_back_when_only_lifecycle_events_exist(db_conn) -> None:
+    """Never prefer no context at all over an internally generated one."""
+
+    await db_conn.execute("DELETE FROM raw_events WHERE incident_id = ?", (str(INCIDENT_ID),))
+    await _append_lifecycle_events(db_conn)
+
+    context = await load_incident_context(db_conn, incident_id=INCIDENT_ID)
+
+    assert context.message.startswith("No alerts for 924s")

@@ -92,8 +92,8 @@ const HEALTH = [
   { label: "API", key: "api" },
   { label: "SSE Stream", key: "sse" },
   { label: "Database", key: "db" },
-  // The outbox worker exposes no health endpoint, so its row reports
-  // "Unknown" rather than asserting a state inferred from the socket.
+  // Worker liveness comes from GET /v1/health/self; the row still falls back
+  // to "Unknown" when that report cannot be read.
   { label: "Outbox Worker", key: "outbox" },
 ] as const;
 

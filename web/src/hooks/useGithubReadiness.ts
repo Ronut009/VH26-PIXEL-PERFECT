@@ -133,8 +133,15 @@ export function repositoryForService(
   if (readiness.kind !== "ready") return null;
   const needle = service.trim().toLowerCase();
   if (!needle) return null;
+  // Search every mapping, not just `service`. That field is only the first of
+  // `services`, so when several services map to one repository - a monorepo,
+  // or one demo repo standing in for a whole stack - matching on it alone
+  // resolves the alphabetically first mapping and reports every other one as
+  // unmapped, however many times the list is refreshed.
   return (
-    readiness.repositories.find((repository) => repository.service?.toLowerCase() === needle) ?? null
+    readiness.repositories.find((repository) =>
+      repository.services.some((mapped) => mapped.trim().toLowerCase() === needle),
+    ) ?? null
   );
 }
 

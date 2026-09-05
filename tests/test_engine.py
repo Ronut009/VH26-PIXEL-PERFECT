@@ -9,10 +9,13 @@ import aiosqlite
 import pytest
 import pytest_asyncio
 
+from src.config import settings
 from src.contracts import NormalizedEvent
 from src.engine.adaptive_ewma import (
+    DEFAULT_GAP_HISTORY_MAX,
     DEFAULT_INITIAL_WINDOW_MS,
     calculate_quiet_deadline,
+    retain_recent_gaps,
 )
 from src.engine.critical_bypass import (
     build_bypass_artifacts,
@@ -334,6 +337,48 @@ def test_timer_wheel_is_safe_for_concurrent_scheduling() -> None:
     assert {trigger.incident_id for trigger in due} == set(incident_ids)
 
 
+def test_gap_history_is_bounded_and_keeps_the_most_recent_gaps() -> None:
+    history = [float(value) for value in range(500)]
+
+    retained = retain_recent_gaps(history, 20)
+
+    assert len(retained) == 20
+    assert retained == [float(value) for value in range(480, 500)]
+    assert retain_recent_gaps([1.0, 2.0]) == [1.0, 2.0], "short histories are untouched"
+
+
+def test_gap_history_limit_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        retain_recent_gaps([1.0], 0)
+
+
+def test_a_bounded_history_keeps_the_window_adapting_to_a_new_cadence() -> None:
+    """The reason the history is capped at all.
+
+    The EWMA gain is ``2/(n+1)``, so an unbounded history drives it toward zero
+    and the window freezes: an incident that fired every 100ms for hours and
+    then slows to one alert every 10s should widen its window, and with 500
+    gaps behind it, it barely moves. Bounding n floors the gain, so the same
+    cadence change is actually tracked.
+    """
+
+    settled = [100.0] * 500
+    slow_gap = 10_000.0
+
+    unbounded = calculate_quiet_deadline(settled, slow_gap, 0)
+    bounded = calculate_quiet_deadline(retain_recent_gaps(settled, 20), slow_gap, 0)
+
+    assert unbounded["mean_gap"] < 200.0, "gain has decayed; the change is ignored"
+    assert bounded["mean_gap"] > unbounded["mean_gap"] * 4
+    assert bounded["quiet_at_ms"] > unbounded["quiet_at_ms"]
+
+
+def test_the_default_gap_history_window_is_the_one_the_engine_uses() -> None:
+    """The pure module's default and the configured limit must not drift."""
+
+    assert settings.GAP_HISTORY_MAX == DEFAULT_GAP_HISTORY_MAX
+
+
 @pytest.mark.parametrize(
     ("service", "alertname", "message", "reason"),
     [
@@ -355,6 +400,74 @@ def test_hardcoded_protected_emergencies_bypass_filters(
 
     assert decision.should_bypass is True
     assert decision.reason == reason
+
+
+def test_one_auth_failure_is_not_an_outage_and_stays_consolidated() -> None:
+    """AUTH_OUTAGE must mean an outage.
+
+    `auth` paired with any failure word used to bypass, so a routine
+    `AuthTokenRefreshFailure` skipped dedupe and paged per alert - twelve
+    identical alerts became twelve incidents. That is the alert fatigue this
+    system exists to remove, manufactured by the rule meant to protect against
+    it. The consolidated path still delivers these; it just does not page for
+    every one.
+    """
+
+    event = _normalized_event(
+        fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        service="auth-service",
+        alertname="AuthTokenRefreshFailure",
+        message="token refresh is failing for a rising share of sessions",
+        pod="auth-a",
+        extra_labels={"cluster": "core"},
+    )
+
+    assert classify_protected_critical(event).should_bypass is False
+
+
+def test_a_genuine_auth_outage_still_bypasses() -> None:
+    """The narrowing must not cost the case the rule exists for."""
+
+    event = _normalized_event(
+        fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        service="auth-service",
+        alertname="AuthServiceDown",
+        message="login is unavailable for all users",
+        pod="auth-a",
+        extra_labels={"cluster": "core"},
+    )
+    decision = classify_protected_critical(event)
+
+    assert decision.should_bypass is True
+    assert decision.reason == "AUTH_OUTAGE"
+
+
+@pytest.mark.parametrize(
+    ("alertname", "message"),
+    [
+        # `down` inside `downstream`, with an auth subject present.
+        ("UpstreamTimeout", "downstream auth dependency is slow"),
+        # `data` inside `metadata`, with a destructive state word present.
+        ("MetadataSyncLag", "metadata rows were deleted by compaction"),
+        # `auth` inside `oauth`, with an outage word present.
+        ("SessionStoreLag", "oauth session store unavailable"),
+    ],
+)
+def test_words_that_merely_contain_a_keyword_do_not_bypass(
+    alertname: str, message: str
+) -> None:
+    """Substring matching made every one of these a protected emergency."""
+
+    event = _normalized_event(
+        fired_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        service="orders-api",
+        alertname=alertname,
+        message=message,
+        pod="orders-a",
+        extra_labels={"cluster": "core"},
+    )
+
+    assert classify_protected_critical(event).should_bypass is False
 
 
 def test_p0_bypass_generates_idempotent_delivery_and_audit_artifacts() -> None:

@@ -11,6 +11,37 @@ import {
 } from "@/lib/api";
 import type { GithubRepository, GithubSnapshot } from "@/lib/types";
 
+/**
+ * Whether the pinned commit is behind the branch.
+ *
+ * Only answerable once a sync has recorded a head; until then the honest
+ * answer is "unknown", and the row says nothing rather than implying the pin
+ * is current.
+ */
+function behindHead(repository: GithubRepository): boolean {
+  return (
+    repository.head_commit_sha !== null &&
+    repository.pinned_commit_sha !== null &&
+    repository.head_commit_sha !== repository.pinned_commit_sha
+  );
+}
+
+/** When a snapshot was pinned, in the viewer's locale, date included. */
+function shortTime(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  return at.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
 function message(error: unknown, fallback: string): string {
   return error instanceof PulseGraphApiError ? error.message : fallback;
 }
@@ -109,6 +140,7 @@ export function RepositoryManager({
   const listId = useId();
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string | null>>({});
+  const [results, setResults] = useState<Record<string, string | null>>({});
   const [snapshots, setSnapshots] = useState<Record<number, GithubSnapshot>>({});
   const [mappingFor, setMappingFor] = useState<number | null>(null);
   const [serviceDraft, setServiceDraft] = useState("");
@@ -118,12 +150,28 @@ export function RepositoryManager({
   const setError = (key: string, value: string | null) =>
     setErrors((previous) => ({ ...previous, [key]: value }));
 
+  const setResult = (key: string, value: string | null) =>
+    setResults((previous) => ({ ...previous, [key]: value }));
+
   const sync = async (installationId: number) => {
     const key = `sync:${installationId}`;
     setBusyKey(key);
     setError(key, null);
+    setResult(key, null);
     try {
-      await syncGithubInstallation(installationId);
+      const before = repositories.filter((r) => r.installation_id === installationId).length;
+      const synced = await syncGithubInstallation(installationId);
+      const after = synced.repository_ids.length;
+      // A successful sync that changes nothing used to render exactly like a
+      // dead button: a moment of "Refreshing...", then the same screen. Most
+      // of the time nothing *has* changed, so saying so is the common case,
+      // not the edge case.
+      setResult(
+        key,
+        after === before
+          ? `No change — ${plural(after, "repository", "repositories")}.`
+          : `Now ${plural(after, "repository", "repositories")}, was ${before}.`,
+      );
       onChanged();
     } catch (caught) {
       setError(key, message(caught, "The repository list could not be refreshed."));
@@ -195,6 +243,11 @@ export function RepositoryManager({
                   {errors[key]}
                 </span>
               )}
+              {!errors[key] && results[key] && (
+                <span role="status" className="text-[12px] text-text-2">
+                  {results[key]}
+                </span>
+              )}
             </span>
           );
         })}
@@ -232,6 +285,31 @@ export function RepositoryManager({
                       {repository.is_private ? " · private" : ""}
                     </span>
                   </p>
+                  <p className="mt-0.5 text-[12px] text-text-3">
+                    {repository.pinned_commit_sha ? (
+                      <>
+                        reads pinned commit{" "}
+                        <span className="font-mono text-text-2">
+                          {repository.pinned_commit_sha.slice(0, 7)}
+                        </span>
+                        {repository.pinned_file_count !== null
+                          ? ` · ${repository.pinned_file_count.toLocaleString()} files`
+                          : ""}
+                        {repository.pinned_at ? ` · pinned ${shortTime(repository.pinned_at)}` : ""}
+                      </>
+                    ) : (
+                      "no snapshot pinned — an analysis has no source to read until you pin one"
+                    )}
+                  </p>
+                  {behindHead(repository) && (
+                    <p role="status" className="mt-0.5 text-[12px] text-[#B45309]">
+                      {repository.default_branch} has moved to{" "}
+                      <span className="font-mono">
+                        {repository.head_commit_sha!.slice(0, 7)}
+                      </span>{" "}
+                      — pin a snapshot to read the newer code
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex shrink-0 flex-wrap items-center gap-2">

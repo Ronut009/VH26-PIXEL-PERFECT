@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { fetchHealth, PulseGraphApiError } from "@/lib/api";
+import { fetchHealth, fetchSelfHealth, PulseGraphApiError } from "@/lib/api";
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -13,6 +13,12 @@ export interface BackendHealth {
   apiReachable: boolean;
   /** True only when `/v1/health` reports its writer connection is usable. */
   databaseHealthy: boolean;
+  /**
+   * Whether the outbox worker is running, from `/v1/health/self`. Null when
+   * that report could not be read - the row says "Unknown" rather than
+   * asserting a state nobody reported.
+   */
+  outboxWorkerRunning: boolean | null;
   /** What went wrong, and the next step, when something did. */
   message: string | null;
   action: string | null;
@@ -22,9 +28,27 @@ const UNKNOWN: BackendHealth = {
   state: "unknown",
   apiReachable: false,
   databaseHealthy: false,
+  outboxWorkerRunning: null,
   message: null,
   action: null,
 };
+
+/**
+ * Worker liveness, read separately from the liveness probe.
+ *
+ * A failure here must not colour the API/database verdict: this route needs a
+ * session and the plain health route does not, so a signed-out tab would
+ * otherwise report a perfectly healthy backend as unreachable.
+ */
+async function probeWorkers(): Promise<boolean | null> {
+  try {
+    const report = await fetchSelfHealth();
+    const running = report.signals?.workers?.outbox;
+    return typeof running === "boolean" ? running : null;
+  } catch {
+    return null;
+  }
+}
 
 async function probeOnce(): Promise<BackendHealth> {
   try {
@@ -34,6 +58,7 @@ async function probeOnce(): Promise<BackendHealth> {
         state: "healthy",
         apiReachable: true,
         databaseHealthy: true,
+        outboxWorkerRunning: null,
         message: null,
         action: null,
       };
@@ -42,6 +67,7 @@ async function probeOnce(): Promise<BackendHealth> {
       state: "degraded",
       apiReachable: true,
       databaseHealthy: false,
+      outboxWorkerRunning: null,
       message: report.error
         ? `The backend is running but its database is unhealthy: ${report.error}`
         : "The backend is running but reports an unhealthy database.",
@@ -52,6 +78,7 @@ async function probeOnce(): Promise<BackendHealth> {
       state: "unreachable",
       apiReachable: false,
       databaseHealthy: false,
+      outboxWorkerRunning: null,
       message:
         error instanceof PulseGraphApiError ? error.message : "The backend health check failed.",
       action: "Start it with `uvicorn src.main:app --reload`, then check PULSEGRAPH_API_BASE.",
@@ -74,8 +101,8 @@ export function useBackendHealth(): BackendHealth {
     let cancelled = false;
 
     const probe = async () => {
-      const next = await probeOnce();
-      if (!cancelled) setHealth(next);
+      const [next, outboxWorkerRunning] = await Promise.all([probeOnce(), probeWorkers()]);
+      if (!cancelled) setHealth({ ...next, outboxWorkerRunning });
     };
 
     void probe();

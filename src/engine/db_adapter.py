@@ -35,6 +35,10 @@ class IncidentRecord:
     # earned a card update while flapping.
     reopen_count: int = 0
     last_flap_notified_ms: int = 0
+    # Which channel this incident was announced on. A PagerDuty-routed incident
+    # has a live page against its id, and closing it needs a resolve on the
+    # same channel - Slack alone leaves the page open forever.
+    route_decision: str | None = None
 
 
 def _iso(value: datetime) -> str:
@@ -76,6 +80,7 @@ async def lookup_incident(
             i.last_flap_notified_at,
             i.gap_history_json,
             i.alert_count,
+            i.route_decision,
             r.service,
             r.alertname,
             r.severity_raw,
@@ -123,6 +128,7 @@ async def lookup_incident(
         last_seen_ms=_epoch_ms(row["last_alert_at"]),
         gap_history=gap_history,
         alert_count=int(row["alert_count"]),
+        route_decision=row["route_decision"],
         first_alert_ms=_epoch_ms(row["first_alert_at"]),
         # Fall back to event time for rows written before the two clocks were
         # separated, so an existing database keeps working rather than

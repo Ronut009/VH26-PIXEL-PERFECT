@@ -1,8 +1,11 @@
 import type { NextRequest } from "next/server";
-import { callBackend, errorResponse } from "@/server/pulsegraph";
+import { LOCAL_MODEL_TIMEOUT_MS, callBackend, errorResponse } from "@/server/pulsegraph";
 import { requireDashboardUser } from "@/server/auth";
 
 export const dynamic = "force-dynamic";
+// A local model reading pinned source outlives the platform's default handler
+// budget; without this the route is killed before the backend ever answers.
+export const maxDuration = 180;
 
 /** List the saved analyses for one incident, newest first. */
 export async function GET(
@@ -47,5 +50,6 @@ export async function POST(
     path: `/v1/github/incidents/${encodeURIComponent(incidentId)}/diagnoses`,
     method: "POST",
     admin: true,
+    timeoutMs: LOCAL_MODEL_TIMEOUT_MS,
   });
 }

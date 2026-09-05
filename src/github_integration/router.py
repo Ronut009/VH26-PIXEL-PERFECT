@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from src.config import settings
 from src.db.connection import Database, get_reader_connection
+from src.utils.logging import get_logger
 from src.github_integration.analysis_store import (
     GitHubAnalysisBindingError,
     GitHubAnalysisStoreError,
@@ -61,6 +62,7 @@ from src.github_integration.store import (
     list_snapshot_source_inventory,
     record_webhook_delivery,
     require_active_selected_repository,
+    record_branch_head,
     replace_installation_repositories,
     set_service_mapping,
     set_webhook_delivery_status,
@@ -85,6 +87,9 @@ _ALLOWED_INSTALLATION_ACTIONS = frozenset(
     {"created", "deleted", "suspend", "unsuspend", "new_permissions_accepted"}
 )
 _ALLOWED_WEBHOOK_EVENTS = frozenset({"installation", "installation_repositories"})
+logger = get_logger(__name__)
+
+
 T = TypeVar("T")
 
 
@@ -639,7 +644,47 @@ def create_github_router() -> APIRouter:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="GitHub installation changed while refresh was in progress; retry the sync",
             ) from exc
-        return {"status": "ok", "installation_id": installation_id, "repository_ids": repository_ids}
+
+        # Note where each default branch now points. This is what makes a
+        # refresh answer the question operators actually ask - "has my repo
+        # changed since I pinned it?" - and it is still read-only: the pinned
+        # commit an analysis reads is untouched. One extra GET per selected
+        # repository, and a failure here must not fail the sync, because the
+        # repository list is the part that had to be persisted.
+        heads: dict[int, str] = {}
+        for repository in remote_repositories:
+            if repository.id not in repository_ids:
+                continue
+            try:
+                branch = await client.get_branch(
+                    repository.owner, repository.name, repository.default_branch, token
+                )
+            except GitHubIntegrationError as exc:
+                logger.warning(
+                    "branch_head_refresh_failed",
+                    repository=repository.full_name,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:300],
+                )
+                continue
+            heads[repository.id] = branch.commit_sha
+
+        if heads:
+
+            async def persist_heads(tx: aiosqlite.Connection) -> None:
+                for repository_id, commit_sha in heads.items():
+                    await record_branch_head(
+                        tx, repository_id=repository_id, commit_sha=commit_sha
+                    )
+
+            await _write(request, persist_heads)
+
+        return {
+            "status": "ok",
+            "installation_id": installation_id,
+            "repository_ids": repository_ids,
+            "branch_heads_checked": len(heads),
+        }
 
     @router.put(
         "/service-mappings/{service}",
@@ -1031,11 +1076,28 @@ def create_github_router() -> APIRouter:
         except HTTPException:
             raise
         except OllamaLocalError as exc:
+            # The response stays deliberately opaque, but an operator with
+            # nothing to read cannot tell a model that refused from a model
+            # that is not running. The reason belongs in the log.
+            logger.warning(
+                "patch_preview_failed",
+                analysis_id=analysis_id,
+                stage="provider",
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="local model could not produce a reviewable patch preview",
             ) from exc
         except PatchWorkspaceError as exc:
+            logger.warning(
+                "patch_preview_failed",
+                analysis_id=analysis_id,
+                stage="workspace",
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+            )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="local model patch did not satisfy the review constraints",
@@ -1043,6 +1105,13 @@ def create_github_router() -> APIRouter:
         except Exception as exc:
             # A substitute local provider in deployment or a temporary
             # workspace failure must not leak source or model internals.
+            logger.warning(
+                "patch_preview_failed",
+                analysis_id=analysis_id,
+                stage="unexpected",
+                error_type=type(exc).__name__,
+                error=str(exc)[:500],
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="patch preview could not be created safely",

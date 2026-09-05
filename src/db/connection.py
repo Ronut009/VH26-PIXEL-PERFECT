@@ -70,10 +70,20 @@ _GRAPH_SCOPE_COLUMN_MIGRATIONS = (
     ("ranked_at", "TEXT"),
 )
 
+# What the repository's default branch pointed at when the installation was
+# last synced. Distinct from `last_seen_commit_sha`, which records the commit
+# that was *pinned* - so on its own it can never say that the repository has
+# moved on since. Without the two being separate, a stale pin is invisible.
+_GITHUB_REPOSITORY_COLUMN_MIGRATIONS = (
+    ("head_commit_sha", "TEXT"),
+    ("head_checked_at", "TEXT"),
+)
+
 _COLUMN_MIGRATIONS = {
     "outbox": _OUTBOX_COLUMN_MIGRATIONS,
     "incidents": _INCIDENT_COLUMN_MIGRATIONS,
     "graph_scope_stats": _GRAPH_SCOPE_COLUMN_MIGRATIONS,
+    "github_repositories": _GITHUB_REPOSITORY_COLUMN_MIGRATIONS,
 }
 
 

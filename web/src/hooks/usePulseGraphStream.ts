@@ -150,11 +150,33 @@ export function usePulseGraphStream() {
     mountedRef.current = true;
     let source: EventSource | null = null;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
 
     const startPolling = () => {
       if (pollTimer) return;
       pollOnce();
       pollTimer = setInterval(pollOnce, POLL_INTERVAL_MS);
+    };
+
+    const stopPolling = () => {
+      if (!pollTimer) return;
+      clearInterval(pollTimer);
+      pollTimer = null;
+    };
+
+    // EventSource retries on its own only until it reaches CLOSED, and a
+    // backend restart is enough to get there. Without an explicit retry the
+    // dashboard spends the rest of the tab's life on the REST fallback and
+    // reports the stream as Down, even once the backend is healthy again.
+    const scheduleReconnect = () => {
+      if (reconnectTimer) return;
+      const delay = Math.min(30_000, 1_000 * 2 ** reconnectAttempt);
+      reconnectAttempt += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (mountedRef.current) openStream();
+      }, delay);
     };
 
     const touch = (streamId: unknown) => {
@@ -174,64 +196,76 @@ export function usePulseGraphStream() {
       }
     };
 
-    try {
-      source = new EventSource(streamUrl(cursorRef.current));
+    const openStream = () => {
+      try {
+        source = new EventSource(streamUrl(cursorRef.current));
 
-      // An open connection is itself the liveness signal. The backend only
-      // emits its initial snapshot when `stream_id > cursor`, so against an
-      // empty database the first thing to arrive is a keepalive comment — and
-      // waiting for a data event would leave a perfectly healthy stream
-      // reported as "Offline", stuck loading forever.
-      source.onopen = () => {
-        setState("live");
-        setLoading(false);
-        setLastUpdated(new Date());
-      };
+        // An open connection is itself the liveness signal. The backend only
+        // emits its initial snapshot when `stream_id > cursor`, so against an
+        // empty database the first thing to arrive is a keepalive comment — and
+        // waiting for a data event would leave a perfectly healthy stream
+        // reported as "Offline", stuck loading forever.
+        source.onopen = () => {
+          // The cursor survives the gap, so nothing is replayed or skipped;
+          // polling can stop the moment the stream is carrying events again.
+          reconnectAttempt = 0;
+          stopPolling();
+          setState("live");
+          setLoading(false);
+          setLastUpdated(new Date());
+        };
 
-      source.addEventListener("snapshot", (event) => {
-        const data = parse(event as MessageEvent) as SnapshotPayload | null;
-        if (!data) return;
-        replaceIncidents(data.incidents ?? []);
-        replaceEdges(data.edges ?? []);
-        touch(data.streamId);
-      });
+        source.addEventListener("snapshot", (event) => {
+          const data = parse(event as MessageEvent) as SnapshotPayload | null;
+          if (!data) return;
+          replaceIncidents(data.incidents ?? []);
+          replaceEdges(data.edges ?? []);
+          touch(data.streamId);
+        });
 
-      source.addEventListener("incident.upsert", (event) => {
-        const data = parse(event as MessageEvent);
-        if (!data) return;
-        if (data.incident) mergeIncidents([data.incident as Record<string, unknown>]);
-        touch(data.streamId);
-      });
+        source.addEventListener("incident.upsert", (event) => {
+          const data = parse(event as MessageEvent);
+          if (!data) return;
+          if (data.incident) mergeIncidents([data.incident as Record<string, unknown>]);
+          touch(data.streamId);
+        });
 
-      source.addEventListener("graph.edge.upsert", (event) => {
-        const data = parse(event as MessageEvent);
-        if (!data) return;
-        mergeEdges((data.edges as Record<string, unknown>[]) ?? []);
-        touch(data.streamId);
-      });
+        source.addEventListener("graph.edge.upsert", (event) => {
+          const data = parse(event as MessageEvent);
+          if (!data) return;
+          mergeEdges((data.edges as Record<string, unknown>[]) ?? []);
+          touch(data.streamId);
+        });
 
-      source.addEventListener("metrics.update", (event) => {
-        const data = parse(event as MessageEvent);
-        if (data) touch(data.streamId);
-      });
+        source.addEventListener("metrics.update", (event) => {
+          const data = parse(event as MessageEvent);
+          if (data) touch(data.streamId);
+        });
 
-      source.onerror = () => {
-        // EventSource retries on its own; if it never opened, fall back to REST
-        // so the dashboard still shows data.
-        if (source && source.readyState === EventSource.CLOSED) {
-          source.close();
-          source = null;
-        }
+        source.onerror = () => {
+          // EventSource retries on its own while it is still CONNECTING; only
+          // a CLOSED socket is ours to replace. Poll so the dashboard keeps
+          // showing data, and keep trying to get the stream back.
+          if (source && source.readyState === EventSource.CLOSED) {
+            source.close();
+            source = null;
+            startPolling();
+            scheduleReconnect();
+          }
+        };
+      } catch {
         startPolling();
-      };
-    } catch {
-      startPolling();
-    }
+        scheduleReconnect();
+      }
+    };
+
+    openStream();
 
     return () => {
       mountedRef.current = false;
       if (source) source.close();
       if (pollTimer) clearInterval(pollTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
     };
   }, [mergeIncidents, mergeEdges, replaceIncidents, replaceEdges, pollOnce]);
 

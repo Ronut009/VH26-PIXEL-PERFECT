@@ -8,6 +8,29 @@ DEFAULT_INITIAL_WINDOW_MS = 5_000
 # ceiling, one pathologically slow-flapping alert can predict a window of
 # hours and hold its incident undelivered for that long.
 DEFAULT_MAX_WINDOW_MS = 300_000
+# How many inter-arrival gaps one incident keeps. This is not a storage
+# nicety: the EWMA gain below is 2/(n+1), so an unbounded history drives the
+# gain toward zero and the window stops adapting -- after a few hundred alerts
+# a genuine change in cadence barely moves the mean, which is the opposite of
+# what an adaptive window is for. Bounding n turns it into a true sliding
+# EWMA with a fixed floor on its gain (2/21 at 20 gaps), and incidentally
+# bounds what one incident costs to rewrite on every alert.
+DEFAULT_GAP_HISTORY_MAX = 20
+
+
+def retain_recent_gaps(
+    gap_history: list[float], limit: int | None = None
+) -> list[float]:
+    """Keep only the most recent gaps, preserving order.
+
+    Applied where the history grows, so a row written by an older version
+    shrinks to the window on its next alert rather than needing a migration.
+    """
+
+    window = DEFAULT_GAP_HISTORY_MAX if limit is None else int(limit)
+    if window <= 0:
+        raise ValueError("gap history limit must be greater than zero")
+    return list(gap_history[-window:])
 
 
 def _validate_gap(gap: float) -> float:

@@ -146,10 +146,19 @@ def _active_snapshot_from_row(row: aiosqlite.Row | dict[str, Any]) -> ActiveServ
 async def load_incident_context(
     tx: aiosqlite.Connection, *, incident_id: str | UUID
 ) -> DiagnosisIncidentContext:
-    """Load a bounded diagnosis context from one incident's latest alert.
+    """Load a bounded diagnosis context from one incident's latest real alert.
 
     Raw event payloads are intentionally not selected.  The result only uses
     fields already normalized by the ingest/incident engine.
+
+    "Real" means ingested from a monitoring source. PulseGraph writes its own
+    lifecycle events into the same ledger with ``source = 'generic'`` - the
+    quiet-deadline trigger and the silence sweeper's resolution note - and on a
+    resolved incident those are the most recent rows. Handing the model "No
+    alerts for 924s, presumed resolved" as the incident's message asks it to
+    diagnose our own bookkeeping instead of the outage: it correctly answers
+    that nothing is wrong and proposes no fix, which then fails the grounded
+    contract and surfaces as an unexplained fallback.
     """
 
     incident_id_text = _uuid_text(incident_id, "incident_id")
@@ -164,7 +173,10 @@ async def load_incident_context(
             SELECT latest.event_id
             FROM raw_events AS latest
             WHERE latest.incident_id = i.incident_id
-            ORDER BY latest.seq DESC
+            -- Externally ingested alerts first, newest of those; an incident
+            -- built only from internal events still yields a context rather
+            -- than no row at all.
+            ORDER BY (latest.source = 'generic') ASC, latest.seq DESC
             LIMIT 1
         )
         WHERE i.incident_id = ?

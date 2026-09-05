@@ -85,12 +85,13 @@ export function DashboardApp({ user }: { user: DashboardUser }) {
   const consolidated = t.alertsIn - t.surfaced;
 
   // Reported, not inferred: API and Database come from GET /v1/health, and the
-  // outbox worker has no health endpoint, so it says so rather than guessing.
+  // outbox worker from the self-check report's worker liveness. Anything the
+  // backend did not actually report stays null, and the row says "Unknown".
   const health: Record<string, boolean | null> = {
     api: backend.state === "unknown" ? null : backend.apiReachable,
     sse: state === "connecting" ? null : state === "live",
     db: backend.state === "unknown" ? null : backend.databaseHealthy,
-    outbox: null,
+    outbox: backend.outboxWorkerRunning,
   };
 
   const githubSummary =

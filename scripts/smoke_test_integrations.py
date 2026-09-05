@@ -19,6 +19,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import httpx
 from src.config import settings
 
+# This script prints box-drawing characters and emoji. On Windows the console
+# default is cp1252, which cannot encode them, and the failure is a traceback
+# out of print() before a single integration has been contacted - so a healthy
+# Slack and PagerDuty look broken. Every other script in scripts/ does this.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 
 # ── Colours for terminal output ──────────────────────────────────────────────
 GREEN = "\033[92m"

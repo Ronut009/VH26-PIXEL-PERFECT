@@ -22,6 +22,10 @@ from src.github_integration.anthropic_provider import (
 )
 from src.github_integration.client import GitHubConfigurationError, GitHubReadOnlyClient
 from src.github_integration.diagnosis import DiagnosisService
+from src.github_integration.groq_provider import (
+    GroqConfigurationError,
+    GroqDiagnosisProvider,
+)
 from src.github_integration.ollama_provider import (
     OllamaLocalConfigurationError,
     OllamaLocalLimits,
@@ -106,26 +110,10 @@ async def lifespan(app: FastAPI):
     # leaves the GitHub diagnosis endpoint available for its safe fallback,
     # while alert ingestion keeps its original startup path.
     ollama_provider: OllamaLocalProvider | None = None
-    hosted_provider: AnthropicDiagnosisProvider | None = None
+    hosted_provider: AnthropicDiagnosisProvider | GroqDiagnosisProvider | None = None
     app.state.ollama_provider = None
     app.state.hosted_provider = None
     app.state.diagnosis_service = DiagnosisService()
-
-    # Local first when both are configured: it is the option that keeps source
-    # inside the deployment, so it should win by default rather than by luck.
-    if settings.ANTHROPIC_DIAGNOSIS_ENABLED and not settings.OLLAMA_ENABLED:
-        try:
-            hosted_provider = AnthropicDiagnosisProvider(
-                settings.ANTHROPIC_API_KEY,
-                model=settings.ANTHROPIC_MODEL,
-                max_tokens=settings.ANTHROPIC_MAX_OUTPUT_TOKENS,
-                timeout=settings.ANTHROPIC_TIMEOUT_SECONDS,
-            )
-            app.state.hosted_provider = hosted_provider
-            app.state.diagnosis_service = DiagnosisService(hosted_provider)
-            logger.info("hosted_diagnosis_enabled", model=settings.ANTHROPIC_MODEL)
-        except (AnthropicConfigurationError, ValueError) as exc:
-            logger.warning("hosted_diagnosis_disabled", reason=str(exc))
 
     if settings.OLLAMA_ENABLED:
         try:
@@ -142,9 +130,54 @@ async def lifespan(app: FastAPI):
                 ),
             )
             app.state.ollama_provider = ollama_provider
-            app.state.diagnosis_service = DiagnosisService(ollama_provider)
         except (OllamaLocalConfigurationError, ValueError) as exc:
             logger.warning("ollama_diagnosis_disabled", reason=str(exc))
+
+    # One hosted provider at most, Groq preferred when both are configured.
+    if settings.GROQ_DIAGNOSIS_ENABLED:
+        try:
+            hosted_provider = GroqDiagnosisProvider(
+                settings.GROQ_API_KEY,
+                model=settings.GROQ_MODEL,
+                base_url=settings.GROQ_BASE_URL,
+                max_tokens=settings.GROQ_MAX_OUTPUT_TOKENS,
+                timeout=settings.GROQ_TIMEOUT_SECONDS,
+            )
+            logger.info("hosted_diagnosis_enabled", model=settings.GROQ_MODEL)
+        except (GroqConfigurationError, ValueError) as exc:
+            logger.warning("hosted_diagnosis_disabled", reason=str(exc))
+    elif settings.ANTHROPIC_DIAGNOSIS_ENABLED:
+        try:
+            hosted_provider = AnthropicDiagnosisProvider(
+                settings.ANTHROPIC_API_KEY,
+                model=settings.ANTHROPIC_MODEL,
+                max_tokens=settings.ANTHROPIC_MAX_OUTPUT_TOKENS,
+                timeout=settings.ANTHROPIC_TIMEOUT_SECONDS,
+            )
+            logger.info("hosted_diagnosis_enabled", model=settings.ANTHROPIC_MODEL)
+        except (AnthropicConfigurationError, ValueError) as exc:
+            logger.warning("hosted_diagnosis_disabled", reason=str(exc))
+    app.state.hosted_provider = hosted_provider
+
+    # The order is the whole policy. Local first by default: source only leaves
+    # the deployment when the local model could not produce a grounded answer,
+    # and never merely because a hosted key happens to be configured.
+    #
+    # DIAGNOSIS_PREFER_HOSTED inverts that on purpose, for the case where the
+    # local model cannot do the job at all - a large source budget it will
+    # always time out on. Whichever way round, the other provider stays in the
+    # chain as the fallback.
+    if ollama_provider is not None or hosted_provider is not None:
+        order = (
+            (hosted_provider, ollama_provider)
+            if settings.DIAGNOSIS_PREFER_HOSTED
+            else (ollama_provider, hosted_provider)
+        )
+        app.state.diagnosis_service = DiagnosisService(*order)
+        logger.info(
+            "diagnosis_provider_order",
+            providers=[p.name for p in order if p is not None],
+        )
 
     timer_wheel = TimerWheel()
     writer = DbWriter(timer_wheel=timer_wheel)

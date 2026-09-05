@@ -458,12 +458,24 @@ class SafeFallbackDiagnosisProvider:
 
 
 class DiagnosisService:
-    """Run one provider and enforce grounding and human-review invariants."""
+    """Try each provider in order and enforce grounding and review invariants.
 
-    def __init__(self, provider: DiagnosisProvider | None = None) -> None:
-        self._provider = provider
-        self._provider_name = (
-            _provider_label(provider.name) if provider is not None else None
+    Providers are attempted in the order given and the first grounded answer
+    wins, so the caller sets the policy by ordering them. The intended order is
+    local first: it keeps source inside the deployment, and only a local model
+    that could not produce a usable answer should cause any code to leave.
+
+    A provider is skipped for either kind of failure - it raised, or it answered
+    and the answer failed grounding. The second case is the one that matters in
+    practice: a small local model routinely returns well-formed JSON with an
+    invented line range, which is a wrong answer rather than an outage, and
+    before this it ended the attempt for everybody.
+    """
+
+    def __init__(self, *providers: DiagnosisProvider | None) -> None:
+        self._providers = tuple(provider for provider in providers if provider is not None)
+        self._provider_names = tuple(
+            _provider_label(provider.name) for provider in self._providers
         )
 
     async def diagnose(self, request: DiagnosisRequest) -> DiagnosisResult:
@@ -477,50 +489,60 @@ class DiagnosisService:
 
         if not request.excerpts:
             return safe_fallback("no_source_excerpts")
-        if self._provider is None:
+        if not self._providers:
             return safe_fallback("provider_unavailable")
 
-        try:
-            result = await self._provider.diagnose(request)
-        except Exception as exc:
-            # The response stays deliberately opaque - a provider exception can
-            # carry vendor internals or fragments of the prompt and source. But
-            # discarding it entirely left operators with "provider_unavailable"
-            # and no way to tell a stopped Ollama from a model that answered
-            # with unusable JSON. Log it; do not return it.
-            logger.warning(
-                "diagnosis_provider_failed",
-                provider=self._provider_name,
-                error_type=type(exc).__name__,
-                error=str(exc)[:500],
-            )
-            return safe_fallback("provider_unavailable")
+        # Carried so the caller learns why the *last* attempt failed, rather
+        # than always seeing the first provider's reason.
+        reason = "provider_unavailable"
+        for provider, provider_name in zip(self._providers, self._provider_names):
+            try:
+                result = await provider.diagnose(request)
+            except Exception as exc:
+                # The response stays deliberately opaque - a provider exception
+                # can carry vendor internals or fragments of the prompt and
+                # source. But discarding it entirely left operators with
+                # "provider_unavailable" and no way to tell a stopped Ollama
+                # from a model that answered with unusable JSON. Log it; do not
+                # return it.
+                logger.warning(
+                    "diagnosis_provider_failed",
+                    provider=provider_name,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:500],
+                )
+                reason = "provider_unavailable"
+                continue
 
-        if not isinstance(result, DiagnosisResult):
-            return safe_fallback("invalid_provider_result")
-        try:
-            # ``model_copy`` and ``model_construct`` can bypass Pydantic's
-            # construction validators.  Re-validating the public shape here
-            # prevents a provider from turning such an object into a result
-            # that the rest of PulseGraph trusts.
-            validated_result = DiagnosisResult.model_validate(result.model_dump())
-            self._validate_grounding(request, validated_result)
-        except (DiagnosisContractError, ValidationError, TypeError, ValueError) as exc:
-            # Distinct from the above: the provider answered, and the answer was
-            # rejected. Usually an ungrounded citation - a file path or line
-            # range the model invented rather than copied from the excerpts.
-            logger.warning(
-                "diagnosis_result_rejected",
-                provider=self._provider_name,
-                error_type=type(exc).__name__,
-                error=str(exc)[:500],
-            )
-            return safe_fallback("invalid_provider_result")
+            if not isinstance(result, DiagnosisResult):
+                reason = "invalid_provider_result"
+                continue
+            try:
+                # ``model_copy`` and ``model_construct`` can bypass Pydantic's
+                # construction validators.  Re-validating the public shape here
+                # prevents a provider from turning such an object into a result
+                # that the rest of PulseGraph trusts.
+                validated_result = DiagnosisResult.model_validate(result.model_dump())
+                self._validate_grounding(request, validated_result)
+            except (DiagnosisContractError, ValidationError, TypeError, ValueError) as exc:
+                # Distinct from the above: the provider answered, and the answer
+                # was rejected. Usually an ungrounded citation - a file path or
+                # line range the model invented rather than copied.
+                logger.warning(
+                    "diagnosis_result_rejected",
+                    provider=provider_name,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:500],
+                )
+                reason = "invalid_provider_result"
+                continue
 
-        # The service, not an untrusted provider response, identifies the
-        # provider shown to callers.
-        assert self._provider_name is not None
-        return validated_result.model_copy(update={"provider": self._provider_name})
+            # The service, not an untrusted provider response, identifies the
+            # provider shown to callers - so the card names the model that
+            # actually answered when a fallback provider took over.
+            return validated_result.model_copy(update={"provider": provider_name})
+
+        return safe_fallback(reason)
 
     @staticmethod
     def _validate_grounding(request: DiagnosisRequest, result: DiagnosisResult) -> None:

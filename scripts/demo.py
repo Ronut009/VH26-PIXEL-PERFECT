@@ -695,7 +695,30 @@ def reset_pipeline_data(backend_reachable: bool) -> bool:
     connection = sqlite3.connect(database, timeout=15.0)
     try:
         connection.execute("PRAGMA busy_timeout = 15000")
-        for table in ("outbox", "delivery_intents", "edges", "raw_events", "incidents"):
+        # Children first, then incidents. Anything derived from ingested
+        # alerts belongs here: a half-cleared database is worse than an
+        # uncleared one, because the console then shows a correlation graph
+        # and a health verdict computed from incidents that no longer exist.
+        #
+        # Deliberately NOT cleared: the github_* connection tables (repository,
+        # service mappings, pinned snapshots). Those are configuration the
+        # operator set up, not demo traffic, and re-running the installation
+        # sync and every mapping after each reset is its own kind of trap.
+        # channel_health and channel_outages are live breaker state, not
+        # seeded data, so they stay too.
+        for table in (
+            "outbox",
+            "delivery_intents",
+            "github_incident_analyses",
+            "incident_groups",
+            "edges",
+            "graph_node_stats",
+            "graph_scope_stats",
+            "raw_events",
+            "inbound_events",
+            "source_clock_skew",
+            "incidents",
+        ):
             connection.execute(f"DELETE FROM {table}")
         connection.commit()
     except sqlite3.OperationalError as exc:

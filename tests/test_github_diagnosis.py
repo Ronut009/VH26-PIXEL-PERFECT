@@ -281,3 +281,115 @@ def test_result_schema_forbids_auto_apply_and_unguarded_fallbacks() -> None:
                 "next_steps": ["Inspect source."],
             },
         )
+
+
+# ── provider chain ───────────────────────────────────────────────────────────
+# Local first, hosted second. The ordering is the privacy policy: source only
+# leaves the deployment when the local model could not produce a usable answer.
+
+
+class _RaisingProvider:
+    name = "local-that-is-down"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def diagnose(self, request: DiagnosisRequest) -> DiagnosisResult:
+        self.calls += 1
+        raise RuntimeError("ollama-secret=do-not-leak")
+
+
+class _UngroundedProvider:
+    """Answers, well-formed, citing a line range it was never given.
+
+    This is the common local-model failure: not an outage, a wrong answer. It
+    used to end the attempt for every provider behind it.
+    """
+
+    name = "local-that-hallucinates"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def diagnose(self, request: DiagnosisRequest) -> DiagnosisResult:
+        self.calls += 1
+        grounded = _grounded_result(request)
+        invented = grounded.evidence[-1].model_copy(
+            update={"start_line": 9_000, "end_line": 9_001}
+        )
+        return grounded.model_copy(update={"evidence": [grounded.evidence[0], invented]})
+
+
+class _CountingGroundedProvider:
+    name = "hosted-fallback"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def diagnose(self, request: DiagnosisRequest) -> DiagnosisResult:
+        self.calls += 1
+        return _grounded_result(request)
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_provider_answers_when_the_local_one_is_down() -> None:
+    local, hosted = _RaisingProvider(), _CountingGroundedProvider()
+
+    result = await DiagnosisService(local, hosted).diagnose(_request())
+
+    assert result.status == "diagnosed"
+    assert result.provider == "hosted-fallback", "the card must name who answered"
+    assert (local.calls, hosted.calls) == (1, 1)
+    assert "ollama-secret" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_provider_answers_when_the_local_one_is_ungrounded() -> None:
+    """The case that motivated the chain: answered, but not usably."""
+
+    local, hosted = _UngroundedProvider(), _CountingGroundedProvider()
+
+    result = await DiagnosisService(local, hosted).diagnose(_request())
+
+    assert result.status == "diagnosed"
+    assert result.provider == "hosted-fallback"
+    assert (local.calls, hosted.calls) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_working_local_provider_is_never_escalated() -> None:
+    """No source leaves the deployment when the local model succeeds."""
+
+    local, hosted = _CountingGroundedProvider(), _CountingGroundedProvider()
+    local.name = "local-that-works"
+
+    result = await DiagnosisService(local, hosted).diagnose(_request())
+
+    assert result.provider == "local-that-works"
+    assert hosted.calls == 0, "the hosted provider must not be called at all"
+
+
+@pytest.mark.asyncio
+async def test_every_provider_failing_reports_the_last_reason() -> None:
+    local, hosted = _RaisingProvider(), _UngroundedProvider()
+
+    result = await DiagnosisService(local, hosted).diagnose(_request())
+
+    assert result.status == "fallback"
+    assert result.fallback is not None
+    # Not "provider_unavailable" from the first attempt: the last attempt
+    # answered and was rejected, and that is the more useful thing to report.
+    assert result.fallback.reason == "invalid_provider_result"
+    assert result.provider == "safe-fallback"
+
+
+@pytest.mark.asyncio
+async def test_a_none_provider_in_the_chain_is_skipped() -> None:
+    """Startup passes both slots, either of which may be unconfigured."""
+
+    hosted = _CountingGroundedProvider()
+
+    result = await DiagnosisService(None, hosted).diagnose(_request())
+
+    assert result.status == "diagnosed"
+    assert result.provider == "hosted-fallback"

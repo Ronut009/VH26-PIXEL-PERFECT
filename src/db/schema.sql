@@ -395,6 +395,11 @@ CREATE TABLE IF NOT EXISTS github_repositories (
     is_archived            INTEGER NOT NULL DEFAULT 0 CHECK (is_archived IN (0, 1)),
     is_selected            INTEGER NOT NULL DEFAULT 1 CHECK (is_selected IN (0, 1)),
     last_seen_commit_sha   TEXT,
+    -- Where the default branch pointed at the last sync. Distinct from
+    -- last_seen_commit_sha, which is the commit that was pinned: only the two
+    -- together can say the pinned snapshot has fallen behind the branch.
+    head_commit_sha        TEXT,
+    head_checked_at        TEXT,
     created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     FOREIGN KEY (installation_id) REFERENCES github_installations(installation_id)

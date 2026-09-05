@@ -26,6 +26,7 @@ import type {
   GithubServiceMapping,
   GithubSnapshot,
   HealthReport,
+  SelfHealthReport,
   Incident,
   IncidentEdge,
 } from "./types";
@@ -121,6 +122,10 @@ function asErrorBody(parsed: unknown): ApiErrorBody | null {
  */
 export async function fetchHealth(): Promise<HealthReport> {
   return request<HealthReport>("/api/health");
+}
+
+export async function fetchSelfHealth(): Promise<SelfHealthReport> {
+  return request<SelfHealthReport>("/api/health/self");
 }
 
 export async function fetchIncidentsSince(since?: string): Promise<Incident[]> {

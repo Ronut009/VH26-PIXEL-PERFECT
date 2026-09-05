@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # keep deferring its own delivery, measured from its first alert.
     QUIET_WINDOW_MAX_MS: int = 300_000
     INCIDENT_MAX_BATCH_SPAN_MS: int = 600_000
+    # How many inter-arrival gaps one incident retains. Bounds the EWMA gain
+    # so the window keeps adapting, and bounds the per-alert write.
+    GAP_HISTORY_MAX: int = 20
 
     # Email — the last hop of the failover chain, via any SMTP relay. Gmail
     # needs an app password (not the account password) with 2FA enabled.
@@ -198,6 +201,32 @@ class Settings(BaseSettings):
     # its own flag rather than on the presence of an API key: sending repository
     # source to a third party is a decision an operator makes explicitly, never
     # a side effect of an environment variable being set somewhere.
+    # Hosted fallback for diagnosis, tried only after the local model has
+    # failed. Off by default and never enabled by the mere presence of a key:
+    # turning it on is a decision to let bounded source excerpts leave the
+    # deployment, and that should be explicit.
+    # Ask the hosted model first instead of the local one.
+    #
+    # This inverts the privacy default deliberately, so it is its own flag. The
+    # local-first order exists so that source only leaves the deployment when
+    # the local model could not answer; with this on, every diagnosis sends
+    # bounded excerpts to the hosted provider.
+    #
+    # The reason to want it: a 7B local model cannot ground a diagnosis over a
+    # whole repository's worth of files - it times out and the request then
+    # waits out OLLAMA_TIMEOUT_SECONDS before escalating. Asking the capable
+    # model first turns a two-minute answer into a seven-second one, and the
+    # local model stays in the chain as the fallback for a rate-limited or
+    # unreachable hosted provider.
+    DIAGNOSIS_PREFER_HOSTED: bool = False
+
+    GROQ_DIAGNOSIS_ENABLED: bool = False
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_MAX_OUTPUT_TOKENS: int = 8_000
+    GROQ_TIMEOUT_SECONDS: float = 60.0
+
     ANTHROPIC_DIAGNOSIS_ENABLED: bool = False
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-opus-5"

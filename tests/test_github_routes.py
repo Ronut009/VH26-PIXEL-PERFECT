@@ -210,6 +210,15 @@ def test_verified_installation_webhook_persists_selected_repositories(api_client
             # case this test covers.
             "services": [],
             "service": None,
+            # Nothing pinned yet: the listing says so rather than omitting the
+            # fields, so the dashboard can tell "not pinned" from "unknown".
+            "pinned_commit_sha": None,
+            "pinned_file_count": None,
+            "pinned_at": None,
+            # Where the default branch pointed at the last sync, so a pin that
+            # has fallen behind can be told apart from a current one.
+            "head_commit_sha": None,
+            "head_checked_at": None,
         }
     ]
 
@@ -254,7 +263,14 @@ def test_sync_mapping_and_snapshot_are_read_only_and_pinned(api_client) -> None:
 
     assert install.json() == {"status": "processed"}
     assert sync.status_code == 200
-    assert sync.json() == {"status": "ok", "installation_id": 9988, "repository_ids": [8123]}
+    assert sync.json() == {
+        "status": "ok",
+        "installation_id": 9988,
+        "repository_ids": [8123],
+        # The sync also reads each selected repository's branch head, so the
+        # dashboard can say whether the pinned commit is still current.
+        "branch_heads_checked": 1,
+    }
     assert mapping.json() == {
         "service": "checkout-api",
         "repository_id": 8123,
